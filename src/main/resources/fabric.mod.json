@@ -1,0 +1,29 @@
+{
+	"schemaVersion": 1,
+	"id": "servereconomy",
+	"version": "${version}",
+	"name": "ServerEconomy",
+	"description": "服务器经济系统：货币获取/消耗、假人计费、飞行计费、地标、任务奖励、物品回收、交易手续费等。还有其他功能（tab/称号/TPA/家/back/hat）。",
+	"authors": [
+		"ReallyChooseC"
+	],
+	"contact": {
+	},
+	"license": "GPL-3.0",
+	"icon": "assets/servereconomy/icon.png",
+	"environment": "server",
+	"entrypoints": {
+		"main": [
+			"cn.choosec.economy.ServerEconomy"
+		]
+	},
+	"mixins": [
+		"servereconomy.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~26.2",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

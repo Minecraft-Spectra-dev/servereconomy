@@ -1,0 +1,459 @@
+package cn.choosec.economy.service;
+
+import cn.choosec.economy.config.ConfigManager;
+import cn.choosec.economy.database.DatabaseManager;
+import cn.choosec.economy.economy.EconomyService;
+import cn.choosec.economy.economy.MoneyUtil;
+import cn.choosec.economy.util.MessageUtil;
+import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.Style;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.scores.DisplaySlot;
+import net.minecraft.world.scores.Objective;
+import net.minecraft.world.scores.ScoreHolder;
+import net.minecraft.world.scores.Scoreboard;
+import net.minecraft.network.protocol.game.ClientboundResetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetScorePacket;
+import net.minecraft.network.protocol.game.ClientboundSetDisplayObjectivePacket;
+import net.minecraft.network.protocol.game.ClientboundSetObjectivePacket;
+import net.minecraft.world.scores.criteria.ObjectiveCriteria;
+
+import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * Daily task system: each player independently gets a set of tasks each real day,
+ * drawn from the admin-defined task pool. No more global tasks. A scoreboard
+ * shows the player's daily tasks.
+ */
+public final class DailyTaskService {
+
+    public record Daily(int taskId, String type, String target, int amount, BigDecimal reward,
+                        int progress, boolean completed, boolean rewardClaimed) {
+    }
+
+    /** Result of an admin progress adjustment on a daily task. */
+    public record ProgressResult(boolean found, boolean completed, boolean paidNow, int progress, int amount) {
+    }
+
+    private DailyTaskService() {
+    }
+
+    /** Cache of daily-task lists keyed by "uuid|date"; invalidated on any assignment/progress change. */
+    private static final Map<String, List<Daily>> DAILY_CACHE = new ConcurrentHashMap<>();
+
+    private static void invalidateDaily(UUID uuid, String date) {
+        DAILY_CACHE.remove(uuid + "|" + date);
+    }
+
+    /** Drop cached assignments for every player on a date (daily rollover cleanup). */
+    public static void clearDate(String date) {
+        if (date == null || date.isEmpty()) {
+            return;
+        }
+        String suffix = "|" + date;
+        DAILY_CACHE.keySet().removeIf(k -> k.endsWith(suffix));
+    }
+
+    /** Drop the entire daily cache (used when a pool task is deleted, which removes its rows). */
+    public static void invalidateAll() {
+        DAILY_CACHE.clear();
+    }
+
+    public static String today() {
+        return java.time.LocalDate.now().toString();
+    }
+
+    /** Make sure the player has today's assigned tasks (draw from pool if absent). */
+    public static synchronized void ensureDaily(ServerPlayer p, String date) {
+        ensureDaily(p.getUUID(), date);
+    }
+
+    /** UUID-based overload so admin commands can manage a specific player by UUID. */
+    public static synchronized void ensureDaily(UUID uuid, String date) {
+        ensureDaily(uuid, date, ConfigManager.get().tasks.dailyCount);
+    }
+
+    private static synchronized void ensureDaily(UUID uuid, String date, int count) {
+        // Fast path: if today's assignments are already cached and non-empty, the
+        // database has them too, so high-frequency events (mine/kill/use) skip a
+        // COUNT(*) round-trip. Empty cached lists keep re-checking so a task added
+        // to the pool later in the day can still be drawn.
+        List<Daily> cached = DAILY_CACHE.get(uuid + "|" + date);
+        if (cached != null && !cached.isEmpty()) {
+            return;
+        }
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT COUNT(*) FROM daily_tasks WHERE player = ? AND date = ?")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, date);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next() && rs.getInt(1) > 0) {
+                        return;
+                    }
+                }
+            }
+            int n = Math.max(1, count);
+            List<Integer> pool = new ArrayList<>();
+            String orderBy = DatabaseManager.isMySQL() ? "RAND()" : "RANDOM()";
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT id FROM tasks WHERE enabled = 1 ORDER BY " + orderBy + " LIMIT ?")) {
+                ps.setInt(1, n);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        pool.add(rs.getInt(1));
+                    }
+                }
+            }
+            String insSql = DatabaseManager.isMySQL()
+                    ? "INSERT IGNORE INTO daily_tasks (player, date, task_id, progress, completed, reward_claimed) VALUES (?, ?, ?, 0, 0, 0)"
+                    : "INSERT OR IGNORE INTO daily_tasks (player, date, task_id, progress, completed, reward_claimed) VALUES (?, ?, ?, 0, 0, 0)";
+            try (PreparedStatement ins = c.prepareStatement(insSql)) {
+                for (int tid : pool) {
+                    ins.setString(1, uuid.toString());
+                    ins.setString(2, date);
+                    ins.setInt(3, tid);
+                    ins.addBatch();
+                }
+                ins.executeBatch();
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        invalidateDaily(uuid, date);
+    }
+
+    /** The player's assigned tasks for a given date. */
+    public static synchronized List<Daily> getDaily(UUID uuid, String date) {
+        String key = uuid + "|" + date;
+        List<Daily> cached = DAILY_CACHE.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        List<Daily> out = new ArrayList<>();
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement ps = c.prepareStatement("""
+                    SELECT t.id, t.type, t.target, t.amount, t.reward, d.progress, d.completed, d.reward_claimed
+                    FROM daily_tasks d JOIN tasks t ON t.id = d.task_id
+                    WHERE d.player = ? AND d.date = ? ORDER BY t.id""")) {
+                ps.setString(1, uuid.toString());
+                ps.setString(2, date);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        out.add(new Daily(rs.getInt(1), rs.getString(2), rs.getString(3), rs.getInt(4),
+                                rs.getBigDecimal(5), rs.getInt(6), rs.getInt(7) == 1, rs.getInt(8) == 1));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        DAILY_CACHE.put(key, List.copyOf(out));
+        return out;
+    }
+
+    /** Re-roll: delete the player's tasks for the date, then draw a fresh set at the configured count. */
+    public static synchronized int refresh(UUID uuid, String date) {
+        return refresh(uuid, date, ConfigManager.get().tasks.dailyCount);
+    }
+
+    /** Re-roll with a specific task count; {@code count <= 0} clears all of the player's tasks for the date. */
+    public static synchronized int refresh(UUID uuid, String date, int count) {
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement del = c.prepareStatement("DELETE FROM daily_tasks WHERE player = ? AND date = ?")) {
+                del.setString(1, uuid.toString());
+                del.setString(2, date);
+                del.executeUpdate();
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return 0;
+        }
+        invalidateDaily(uuid, date);
+        if (count > 0) {
+            ensureDaily(uuid, date, count);
+        }
+        return getDaily(uuid, date).size();
+    }
+
+    /** Add a specific pool task to the player's daily tasks. False if the task doesn't exist or is already assigned. */
+    public static synchronized boolean addTask(UUID uuid, String date, int taskId) {
+        TaskService.Task t = TaskService.getTask(taskId);
+        if (t == null || !t.enabled()) {
+            return false;
+        }
+        try (Connection c = DatabaseManager.open()) {
+            String insSql = DatabaseManager.isMySQL()
+                    ? "INSERT IGNORE INTO daily_tasks (player, date, task_id, progress, completed, reward_claimed) VALUES (?, ?, ?, 0, 0, 0)"
+                    : "INSERT OR IGNORE INTO daily_tasks (player, date, task_id, progress, completed, reward_claimed) VALUES (?, ?, ?, 0, 0, 0)";
+            try (PreparedStatement ins = c.prepareStatement(insSql)) {
+                ins.setString(1, uuid.toString());
+                ins.setString(2, date);
+                ins.setInt(3, taskId);
+                boolean added = ins.executeUpdate() > 0;
+                if (added) {
+                    invalidateDaily(uuid, date);
+                }
+                return added;
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return false;
+        }
+    }
+
+    /** Remove a task from the player's daily tasks. */
+    public static synchronized boolean removeTask(UUID uuid, String date, int taskId) {
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement del = c.prepareStatement(
+                    "DELETE FROM daily_tasks WHERE player = ? AND date = ? AND task_id = ?")) {
+                del.setString(1, uuid.toString());
+                del.setString(2, date);
+                del.setInt(3, taskId);
+                boolean removed = del.executeUpdate() > 0;
+                if (removed) {
+                    invalidateDaily(uuid, date);
+                }
+                return removed;
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return false;
+        }
+    }
+
+    /**
+     * Adjust a daily task's progress by a signed delta (admin command).
+     * Reaching the required amount completes the task and pays the reward once;
+     * dropping below the requirement un-completes it (already paid rewards are not clawed back).
+     */
+    public static synchronized ProgressResult adjustProgress(UUID uuid, String date, int taskId, int delta) {
+        TaskService.Task t = TaskService.getTask(taskId);
+        if (t == null) {
+            return new ProgressResult(false, false, false, 0, 0);
+        }
+        try (Connection c = DatabaseManager.open()) {
+            int cur;
+            boolean rewardClaimed = false;
+            try (PreparedStatement sel = c.prepareStatement(
+                    "SELECT progress, completed, reward_claimed FROM daily_tasks WHERE player = ? AND date = ? AND task_id = ?")) {
+                sel.setString(1, uuid.toString());
+                sel.setString(2, date);
+                sel.setInt(3, taskId);
+                try (ResultSet rs = sel.executeQuery()) {
+                    if (!rs.next()) {
+                        return new ProgressResult(false, false, false, 0, t.amount());
+                    }
+                    cur = rs.getInt(1);
+                    rewardClaimed = rs.getInt(3) == 1;
+                }
+            }
+            int target = Math.max(0, Math.min(t.amount(), cur + delta));
+            boolean nowComplete = target >= t.amount();
+            try (PreparedStatement up = c.prepareStatement(
+                    "UPDATE daily_tasks SET progress = ?, completed = ?, reward_claimed = ? WHERE player = ? AND date = ? AND task_id = ?")) {
+                up.setInt(1, target);
+                up.setInt(2, nowComplete ? 1 : 0);
+                // keep reward_claimed sticky once paid, so un-completing and re-completing does not pay twice
+                up.setInt(3, nowComplete ? 1 : (rewardClaimed ? 1 : 0));
+                up.setString(4, uuid.toString());
+                up.setString(5, date);
+                up.setInt(6, taskId);
+                up.executeUpdate();
+            }
+            invalidateDaily(uuid, date);
+            boolean paidNow = false;
+            if (nowComplete && !rewardClaimed) {
+                EconomyService.add(uuid, null, t.reward(), "daily-task:" + taskId);
+                paidNow = true;
+            }
+            return new ProgressResult(true, nowComplete, paidNow, target, t.amount());
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return new ProgressResult(false, false, false, 0, t.amount());
+        }
+    }
+
+    /** Credit progress for an action matching a task type/target. */
+    public static synchronized void addProgress(ServerPlayer p, String type, String target) {
+        UUID uuid = p.getUUID();
+        String date = today();
+        ensureDaily(p, date);
+        try (Connection c = DatabaseManager.open()) {
+            List<int[]> rows = new ArrayList<>(); // {taskId, amount}
+            List<BigDecimal> rewards = new ArrayList<>();
+            try (PreparedStatement sel = c.prepareStatement("""
+                    SELECT d.task_id, t.amount, t.reward, d.reward_claimed
+                    FROM daily_tasks d JOIN tasks t ON t.id = d.task_id
+                    WHERE d.player = ? AND d.date = ? AND t.type = ? AND t.target = ? AND d.completed = 0""")) {
+                sel.setString(1, uuid.toString());
+                sel.setString(2, date);
+                sel.setString(3, type);
+                sel.setString(4, target);
+                try (ResultSet rs = sel.executeQuery()) {
+                    while (rs.next()) {
+                        rows.add(new int[]{rs.getInt(1), rs.getInt(2), rs.getInt(4)});
+                        rewards.add(rs.getBigDecimal(3));
+                    }
+                }
+            }
+            for (int i = 0; i < rows.size(); i++) {
+                int taskId = rows.get(i)[0];
+                int amount = rows.get(i)[1];
+                int rewardClaimed = rows.get(i)[2];
+                BigDecimal reward = rewards.get(i);
+                try (PreparedStatement up = c.prepareStatement(
+                        "UPDATE daily_tasks SET progress = progress + 1 WHERE player = ? AND date = ? AND task_id = ?")) {
+                    up.setString(1, uuid.toString());
+                    up.setString(2, date);
+                    up.setInt(3, taskId);
+                    up.executeUpdate();
+                }
+                int progress;
+                try (PreparedStatement pr = c.prepareStatement(
+                        "SELECT progress FROM daily_tasks WHERE player = ? AND date = ? AND task_id = ?")) {
+                    pr.setString(1, uuid.toString());
+                    pr.setString(2, date);
+                    pr.setInt(3, taskId);
+                    try (ResultSet prs = pr.executeQuery()) {
+                        progress = prs.next() ? prs.getInt(1) : 0;
+                    }
+                }
+                if (progress >= amount) {
+                    try (PreparedStatement comp = c.prepareStatement(
+                            "UPDATE daily_tasks SET completed = 1, reward_claimed = 1 WHERE player = ? AND date = ? AND task_id = ?")) {
+                        comp.setString(1, uuid.toString());
+                        comp.setString(2, date);
+                        comp.setInt(3, taskId);
+                        comp.executeUpdate();
+                    }
+                    // guard against re-paying a task that was already rewarded then un-completed by an admin
+                    if (rewardClaimed == 0) {
+                        EconomyService.add(uuid, p.getName().getString(), reward, "daily-task:" + taskId);
+                        p.sendSystemMessage(MessageUtil.parse("&a完成每日任务，获得 &e"
+                                + MoneyUtil.format(reward) + " " + ConfigManager.get().currencyAbbreviation));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        invalidateDaily(uuid, date);
+        // NOTE: no synchronous updateScoreboard here. The EconomyTicker already
+        // refreshes every player's scoreboard every second, so doing it on
+        // every action (block break / kill / use / consume) was the main cause of
+        // server-thread stalls while mining.
+    }
+
+    /** A scoreboard row: its display component and the sorting score. */
+    private record ScoreRow(Component display, int score) {
+    }
+
+    /** Last sent score rows per player, for diffing. */
+    private static final Map<UUID, Map<String, ScoreRow>> lastRows = new ConcurrentHashMap<>();
+
+    /** Whether the per-player objective has been sent (ADD) on the current connection. */
+    private static final Set<UUID> objectiveAdded = ConcurrentHashMap.newKeySet();
+
+    /** Called when a player disconnects, to clear per-connection state. */
+    public static void onPlayerQuit(UUID uuid) {
+        objectiveAdded.remove(uuid);
+        lastRows.remove(uuid);
+    }
+
+    /** Render the player's own daily tasks on their sidebar via direct packets (per-player, real-time). */
+    public static void updateScoreboard(ServerPlayer p, String date) {
+        try {
+            UUID uuid = p.getUUID();
+            // Load the configured scoreboard language's translations server-side
+            // (no-op after the first call) for server-side scoreboard resolution.
+            cn.choosec.economy.util.TaskNames.load(p.level().getServer());
+            net.minecraft.world.scores.Scoreboard sb = p.level().getServer().getScoreboard();
+            String name = "eco_daily_" + uuid.toString().substring(0, 8);
+            boolean zh = "zh_cn".equalsIgnoreCase(ConfigManager.get().scoreboardLanguage);
+            net.minecraft.world.scores.Objective obj = new net.minecraft.world.scores.Objective(
+                    sb, name, ObjectiveCriteria.DUMMY,
+                    Component.literal(zh ? "个人信息" : "Profile"),
+                    ObjectiveCriteria.RenderType.INTEGER, false, null);
+            // ADD (0) only once per connection, then UPDATE (2) — avoids client "already exists" error
+            int mode = objectiveAdded.contains(uuid) ? 2 : 0;
+            p.connection.send(new ClientboundSetObjectivePacket(obj, mode));
+            objectiveAdded.add(uuid);
+
+            String currency = ConfigManager.get().currencyAbbreviation;
+            LinkedHashMap<String, ScoreRow> newRows = new LinkedHashMap<>();
+            // 个人信息区块：货币（绿） + 数量/单位（黄）
+            newRows.put("balance", new ScoreRow(MessageUtil.parse(
+                    "&a" + (zh ? "货币" : "Balance")
+                            + " &e" + MoneyUtil.format(EconomyService.getBalance(uuid, p.getName().getString()))
+                            + " " + currency), 99));
+            // 每日任务区块
+            newRows.put("header_daily", new ScoreRow(MessageUtil.parse(
+                    "&6" + (zh ? "每日任务" : "Daily Tasks")), 98));
+            List<Daily> dailies = getDaily(uuid, date);
+            if (dailies.isEmpty()) {
+                newRows.put("task_empty", new ScoreRow(MessageUtil.parse(
+                        "&7" + (zh ? "今日无任务" : "No tasks today")), 97));
+            } else {
+                int i = 1;
+                for (Daily d : dailies) {
+                    // Hybrid: the mod task-type key (servereconomy.task.type.*) is resolved
+                    // to text server-side (a vanilla client has no mod lang file and would
+                    // otherwise show the raw key), while the vanilla item/block/entity name
+                    // stays a translatable key that the client renders from its own lang.
+                    Style taskStyle = d.completed()
+                            ? Style.EMPTY.withColor(ChatFormatting.GRAY).withStrikethrough(true)
+                            : Style.EMPTY.withColor(ChatFormatting.GREEN);
+                    Style rewardStyle = d.completed()
+                            ? Style.EMPTY.withColor(ChatFormatting.GRAY).withStrikethrough(true)
+                            : Style.EMPTY.withColor(ChatFormatting.YELLOW);
+                    MutableComponent line = Component.empty()
+                            .append(Component.literal(i + ". ").withStyle(taskStyle))
+                            .append(cn.choosec.economy.util.TaskNames.taskComponent(d.type(), d.target(), zh, taskStyle));
+                    if (!d.completed()) {
+                        line.append(Component.literal(" " + d.progress() + "/" + d.amount()).withStyle(taskStyle));
+                    }
+                    line.append(Component.literal(" " + MoneyUtil.format(d.reward()) + " " + currency)
+                            .withStyle(rewardStyle));
+                    newRows.put("task_" + d.taskId(), new ScoreRow(line, 97 - (i - 1)));
+                    i++;
+                }
+            }
+
+            Map<String, ScoreRow> old = lastRows.getOrDefault(uuid, new HashMap<>());
+            for (String k : old.keySet()) {
+                if (!newRows.containsKey(k)) {
+                    p.connection.send(new ClientboundResetScorePacket(k, name));
+                }
+            }
+            for (Map.Entry<String, ScoreRow> e : newRows.entrySet()) {
+                ScoreRow nr = e.getValue();
+                ScoreRow or = old.get(e.getKey());
+                if (or == null || or.score() != nr.score() || !or.display().equals(nr.display())) {
+                    p.connection.send(new ClientboundSetScorePacket(e.getKey(), name, nr.score(),
+                            Optional.of(nr.display()), Optional.empty()));
+                }
+            }
+            lastRows.put(uuid, new LinkedHashMap<>(newRows));
+            p.connection.send(new ClientboundSetDisplayObjectivePacket(DisplaySlot.SIDEBAR, obj));
+        } catch (Exception e) {
+            // scoreboard is best-effort
+        }
+    }
+}

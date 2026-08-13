@@ -1,0 +1,7 @@
+{
+  "servereconomy.task.type.kill": "Kill",
+  "servereconomy.task.type.mine": "Mine",
+  "servereconomy.task.type.use": "Use",
+  "servereconomy.task.type.consume": "Consume",
+  "servereconomy.task.type.reach": "Reach"
+}

@@ -1,0 +1,7 @@
+{
+  "servereconomy.task.type.kill": "击杀",
+  "servereconomy.task.type.mine": "挖掘",
+  "servereconomy.task.type.use": "使用",
+  "servereconomy.task.type.consume": "消耗",
+  "servereconomy.task.type.reach": "到达"
+}

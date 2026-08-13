@@ -1,0 +1,17 @@
+{
+	"required": true,
+	"package": "cn.choosec.economy.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"mixins": [
+		"ConnectionAccessor",
+		"ItemConsumeMixin",
+		"PlayerDisplayNameMixin",
+		"ServerPlayerStatsMixin"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}
