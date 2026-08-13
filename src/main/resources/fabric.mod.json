@@ -8,6 +8,7 @@
 		"ReallyChooseC"
 	],
 	"contact": {
+		"sources": "https://github.com/Minecraft-Spectra-dev/servereconomy"
 	},
 	"license": "GPL-3.0",
 	"icon": "assets/servereconomy/icon.png",
