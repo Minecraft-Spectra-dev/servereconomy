@@ -75,12 +75,13 @@ public final class RedPacketService {
     public static synchronized GrabResult grab(ServerPlayer p, int id) {
         UUID uuid = p.getUUID();
         try (Connection c = DatabaseManager.open()) {
-            BigDecimal remaining; int remCount; boolean lucky;
+            BigDecimal remaining; int remCount; boolean lucky; UUID sender;
             try (PreparedStatement sel = c.prepareStatement(
-                    "SELECT remaining_amount, remaining_count, lucky FROM redpackets WHERE id = ?")) {
+                    "SELECT sender, remaining_amount, remaining_count, lucky FROM redpackets WHERE id = ?")) {
                 sel.setInt(1, id);
                 try (ResultSet rs = sel.executeQuery()) {
                     if (!rs.next()) return new GrabResult(Result.NOT_FOUND, BigDecimal.ZERO);
+                    sender = UUID.fromString(rs.getString("sender"));
                     remaining = rs.getBigDecimal("remaining_amount");
                     remCount = rs.getInt("remaining_count");
                     lucky = rs.getInt("lucky") == 1;
@@ -113,6 +114,12 @@ public final class RedPacketService {
                 ins.executeUpdate();
             }
             EconomyService.add(uuid, p.getName().getString(), amount, "red packet grab #" + id);
+            // 通知发包者：自己抢自己的红包时不重复通知
+            if (!sender.equals(uuid)) {
+                NotificationService.notify(p.level().getServer(), sender,
+                        "&a你的红包 #" + id + " 被 &e" + p.getName().getString() + " &a抢到了 &e"
+                                + MoneyUtil.format(amount) + " " + ConfigManager.get().currencyAbbreviation);
+            }
             return new GrabResult(Result.SUCCESS, amount);
         } catch (SQLException e) {
             DatabaseManager.log(e);

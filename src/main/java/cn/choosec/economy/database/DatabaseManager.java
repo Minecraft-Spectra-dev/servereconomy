@@ -323,6 +323,14 @@ public final class DatabaseManager {
             );
             """);
         st.executeUpdate("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner TEXT NOT NULL,
+                message TEXT NOT NULL,
+                time BIGINT NOT NULL
+            );
+            """);
+        st.executeUpdate("""
             CREATE TABLE IF NOT EXISTS build_requests (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 player TEXT NOT NULL,
@@ -352,6 +360,9 @@ public final class DatabaseManager {
             """);
         st.executeUpdate("""
             CREATE INDEX IF NOT EXISTS idx_mailbox_owner ON mailbox (owner);
+            """);
+        st.executeUpdate("""
+            CREATE INDEX IF NOT EXISTS idx_notifications_owner ON notifications (owner);
             """);
         st.executeUpdate("""
             CREATE INDEX IF NOT EXISTS idx_build_requests_player ON build_requests (player);
@@ -488,6 +499,15 @@ public final class DatabaseManager {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """);
         st.executeUpdate("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id BIGINT NOT NULL AUTO_INCREMENT,
+                owner VARCHAR(36) NOT NULL,
+                message TEXT NOT NULL,
+                time BIGINT NOT NULL,
+                PRIMARY KEY (id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """);
+        st.executeUpdate("""
             CREATE TABLE IF NOT EXISTS build_requests (
                 id BIGINT NOT NULL AUTO_INCREMENT,
                 player VARCHAR(36) NOT NULL,
@@ -510,6 +530,7 @@ public final class DatabaseManager {
         createIndex(st, "idx_market_seller", "market_listings (seller)");
         createIndex(st, "idx_market_item", "market_listings (item)");
         createIndex(st, "idx_mailbox_owner", "mailbox (owner)");
+        createIndex(st, "idx_notifications_owner", "notifications (owner)");
         createIndex(st, "idx_build_requests_player", "build_requests (player)");
         createIndex(st, "idx_balances_name", "balances (name)");
     }

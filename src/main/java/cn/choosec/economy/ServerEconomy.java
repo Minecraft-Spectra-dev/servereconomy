@@ -9,6 +9,7 @@ import cn.choosec.economy.economy.MoneyUtil;
 import cn.choosec.economy.service.DailyTaskService;
 import cn.choosec.economy.service.MailboxService;
 import cn.choosec.economy.service.MarketInput;
+import cn.choosec.economy.service.NotificationService;
 import cn.choosec.economy.service.PreservedService;
 import cn.choosec.economy.service.TaskService;
 import cn.choosec.economy.service.TradeService;
@@ -72,6 +73,7 @@ public class ServerEconomy implements ModInitializer {
                 if (mails > 0) {
                     player.sendSystemMessage(MessageUtil.parse("&e你有 &a" + mails + " &e封邮件待领取，使用 /mails 打开邮箱！"));
                 }
+                NotificationService.deliver(player);
             });
         });
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {

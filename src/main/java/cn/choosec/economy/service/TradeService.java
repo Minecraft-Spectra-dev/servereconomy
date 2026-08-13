@@ -471,6 +471,12 @@ public final class TradeService {
             MailboxService.add(buyer.getUUID(), leftover, reg);
             buyer.sendSystemMessage(MessageUtil.parse("&e背包空间不足，&f" + leftover.getCount() + " &e个已存入邮箱，使用 /mails 领取！"));
         }
+        // 通知上架者：在线即时发送，离线则留到下次上线
+        NotificationService.notify(buyer.level().getServer(), l.seller(),
+                "&a你上架的 &f" + l.itemId() + " &a出售单 #" + l.id() + " 已售出 &e" + buyCount + " &a个，买家 &e"
+                        + buyer.getName().getString() + " &a已到账 &e"
+                        + MoneyUtil.format(MoneyUtil.minusPercent(total, fee)) + " "
+                        + ConfigManager.get().currencyAbbreviation);
         if (buyCount >= l.count()) {
             deleteListing(id);
         } else {
