@@ -228,6 +228,6 @@ public class MyMarketMenu extends ChestMenu {
         sp.sendSystemMessage(MessageUtil.parse(buy
                 ? "&e请输入要&a增加求购&e的数量（将按当前单价&f" + MoneyUtil.format(l.price())
                 + "&e预支托管金），直接发一条聊天消息即可，输入 &c0/c&e 取消："
-                : "&e请输入要&a补货&e的数量（从背包扣除同 id 物品），直接发一条聊天消息即可，输入 &c0/c&e 取消："));
+                : "&e请输入要&a补货&e的数量（从背包扣除完全相同的物品），直接发一条聊天消息即可，输入 &c0/c&e 取消："));
     }
 }

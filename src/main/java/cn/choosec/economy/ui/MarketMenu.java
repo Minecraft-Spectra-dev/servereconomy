@@ -176,7 +176,7 @@ public class MarketMenu extends ChestMenu {
         boolean buy = "BUY".equalsIgnoreCase(l.type());
         String cur = ConfigManager.get().currencyAbbreviation;
         List<Component> lines = new ArrayList<>();
-        lines.add(MessageUtil.parse((buy ? "&e收购" : "&a出售")
+        lines.add(MessageUtil.parse("&8#" + l.id() + " " + (buy ? "&e收购" : "&a出售")
                 + " &8· &6单价 &f" + MoneyUtil.format(l.price()) + " " + cur));
         lines.add(MessageUtil.parse("&7总量 &8· &f" + l.count()));
         lines.add(MessageUtil.parse("&7商家 &8· &f" + TradeService.sellerName(player.level().getServer(), l.seller())));

@@ -146,22 +146,32 @@ public final class EconomyCommands {
                 .then(Commands.literal("fulfill").then(Commands.argument("id", IntegerArgumentType.integer(1))
                         .suggests((ctx, b) -> EcoSuggestions.listingIds(b))
                         .executes(ctx -> marketFulfill(ctx))))
+                .then(Commands.literal("restock").then(Commands.argument("id", IntegerArgumentType.integer(1))
+                        .suggests((ctx, b) -> EcoSuggestions.myListingIds(ctx, b))
+                        .executes(ctx -> marketRestock(ctx))
+                        .then(Commands.argument("count", IntegerArgumentType.integer(1))
+                                .executes(ctx -> marketRestock(ctx)))))
                 .then(Commands.literal("cancel").then(Commands.argument("id", IntegerArgumentType.integer(1))
-                        .suggests((ctx, b) -> EcoSuggestions.listingIds(b))
+                        .suggests((ctx, b) -> EcoSuggestions.myListingIds(ctx, b))
                         .executes(ctx -> marketCancel(ctx)))));
 
         // public landmarks (warp)
         d.register(Commands.literal("warp")
                 .executes(ctx -> warpHelp(ctx))
-                .then(Commands.literal("tp").then(Commands.argument("name", StringArgumentType.word())
+                .then(Commands.literal("tp").then(Commands.argument("name", LandmarkNameArgumentType.name())
                         .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
                         .executes(ctx -> landmarkTp(ctx))))
-                .then(Commands.literal("add").then(Commands.argument("name", StringArgumentType.word())
+                .then(Commands.literal("add").then(Commands.argument("name", LandmarkNameArgumentType.name())
                         .executes(ctx -> landmarkAdd(ctx))
                         .then(Commands.argument("cost", DoubleArgumentType.doubleArg(0.0))
                                 .executes(ctx -> landmarkAdd(ctx)))))
+                .then(Commands.literal("rename")
+                        .then(Commands.argument("name", LandmarkNameArgumentType.name())
+                                .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
+                                .then(Commands.argument("newname", LandmarkNameArgumentType.name())
+                                        .executes(ctx -> landmarkRename(ctx)))))
                 .then(Commands.literal("list").executes(ctx -> landmarkList(ctx)))
-                .then(Commands.literal("del").then(Commands.argument("name", StringArgumentType.word())
+                .then(Commands.literal("del").then(Commands.argument("name", LandmarkNameArgumentType.name())
                         .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
                         .executes(ctx -> landmarkDel(ctx)))));
 
@@ -503,8 +513,7 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c请手持要出售的物品！");
             return 0;
         }
-        int sellCount = Math.min(count, stack.getCount());
-        if (sellCount <= 0) {
+        if (count <= 0) {
             CommandUtil.failure(src, "&c数量无效！");
             return 0;
         }
@@ -519,21 +528,31 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c无法保存该物品数据，上架失败！");
             return 0;
         }
-        int id = TradeService.createListing(p.getUUID(), itemId, sellCount, price, itemData);
+        // 数量可超过一组：手持不足时，从背包补足完全相同的物品
+        int available = TradeService.countExactItems(p, stack);
+        if (available < count) {
+            CommandUtil.failure(src, "&c完全相同的物品不足！需要 &e" + count + " &c个，背包中只有 &e" + available + " &c个。");
+            return 0;
+        }
+        List<ItemStack> removed = TradeService.removeExactItems(p, stack, count);
+        if (removed == null) {
+            CommandUtil.failure(src, "&c上架失败！");
+            return 0;
+        }
+        int id = TradeService.createListing(p.getUUID(), itemId, count, price, itemData);
         if (id == -2) {
+            TradeService.returnItems(p, removed);
             CommandUtil.failure(src, "&c你的上架数量已达上限！");
             return 0;
         }
         if (id < 0) {
+            TradeService.returnItems(p, removed);
             CommandUtil.failure(src, "&c上架失败！");
             return 0;
         }
-        // listing created successfully — now take the items from hand
-        stack.shrink(sellCount);
-        p.getInventory().setItem(p.getInventory().getSelectedSlot(), stack);
         BigDecimal fee = ConfigManager.get().rates.tradeFeePercent;
         String sellerShare = MoneyUtil.format(new BigDecimal("100").subtract(fee));
-        CommandUtil.successQuiet(src, "&a已上架 #" + id + " &e" + sellCount + "x " + itemId
+        CommandUtil.successQuiet(src, "&a已上架 #" + id + " &e" + count + "x " + itemId
                 + " &a单价 &e" + MoneyUtil.format(price) + " " + ConfigManager.get().currencyAbbreviation
                 + " &7(成交后卖家收取 " + sellerShare + "%，" + MoneyUtil.format(fee) + "% 为手续费)");
         return 1;
@@ -687,6 +706,25 @@ public final class EconomyCommands {
         return r == TradeService.FulfillResult.SUCCESS ? 1 : 0;
     }
 
+    private static int marketRestock(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+
+        ServerPlayer p = src.getPlayerOrException();
+        int id = IntegerArgumentType.getInteger(ctx, "id");
+        int count = lastNode(ctx).equals("count") ? IntegerArgumentType.getInteger(ctx, "count") : 1;
+        TradeService.RestockResult r = TradeService.restock(p, id, count);
+        switch (r) {
+            case SUCCESS -> CommandUtil.successQuiet(src, "&a已向订单 &e#" + id + " &a补充 &e" + count + " &a个！");
+            case NOT_FOUND -> CommandUtil.failure(src, "&c该订单不存在！");
+            case NOT_OWNER -> CommandUtil.failure(src, "&c这不是你的订单！");
+            case INVALID_COUNT -> CommandUtil.failure(src, "&c数量无效！");
+            case NO_ITEMS -> CommandUtil.failure(src, "&c背包中没有足够的完全相同的物品！");
+            case NO_FUNDS -> CommandUtil.failure(src, "&c余额不足！补货需预支托管金！");
+            default -> CommandUtil.failure(src, "&c补货失败！");
+        }
+        return r == TradeService.RestockResult.SUCCESS ? 1 : 0;
+    }
+
     /* ---------------- public landmarks ---------------- */
 
     private static int landmarkList(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
@@ -712,7 +750,7 @@ public final class EconomyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer p = src.getPlayerOrException();
-        String name = StringArgumentType.getString(ctx, "name");
+        String name = LandmarkNameArgumentType.getName(ctx, "name");
         LandmarkService.Landmark lm = LandmarkService.getPublic(name);
         if (lm == null) {
             CommandUtil.failure(src, "&c公共地标 &e" + name + " &c不存在！");
@@ -745,7 +783,11 @@ public final class EconomyCommands {
             return 0;
         }
         ServerPlayer p = src.getPlayerOrException();
-        String name = StringArgumentType.getString(ctx, "name");
+        String name = LandmarkNameArgumentType.getName(ctx, "name");
+        if (name.isEmpty()) {
+            CommandUtil.failure(src, "&c名称不能为空！");
+            return 0;
+        }
         BigDecimal cost = lastNode(ctx).equals("cost")
                 ? MoneyUtil.norm(DoubleArgumentType.getDouble(ctx, "cost"))
                 : MoneyUtil.norm(ConfigManager.get().rates.publicLandmarkCost);
@@ -765,11 +807,36 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c需要管理员权限！");
             return 0;
         }
-        String name = StringArgumentType.getString(ctx, "name");
+        String name = LandmarkNameArgumentType.getName(ctx, "name");
         if (LandmarkService.removePublic(name)) {
             CommandUtil.success(src, "&a已删除公共地标 &e" + name);
         } else {
             CommandUtil.failure(src, "&c公共地标 &e" + name + " &c不存在！");
+        }
+        return 1;
+    }
+
+    private static int landmarkRename(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+
+        if (!CommandUtil.isOp(src)) {
+            CommandUtil.failure(src, "&c需要管理员权限！");
+            return 0;
+        }
+        String oldName = LandmarkNameArgumentType.getName(ctx, "name");
+        String newName = LandmarkNameArgumentType.getName(ctx, "newname");
+        if (oldName.isEmpty() || newName.isEmpty()) {
+            CommandUtil.failure(src, "&c名称不能为空！");
+            return 0;
+        }
+        if (oldName.equals(newName)) {
+            CommandUtil.failure(src, "&c新旧名称相同！");
+            return 0;
+        }
+        if (LandmarkService.renamePublic(oldName, newName)) {
+            CommandUtil.success(src, "&a公共地标 &e" + oldName + " &a已重命名为 &e" + newName);
+        } else {
+            CommandUtil.failure(src, "&c公共地标 &e" + oldName + " &c不存在或名称 &e" + newName + " &c已被占用！");
         }
         return 1;
     }
@@ -781,7 +848,9 @@ public final class EconomyCommands {
         src.sendSystemMessage(MessageUtil.parse("&e/warp list &7查看所有公共地标"));
         src.sendSystemMessage(MessageUtil.parse("&e/warp tp <名称> &7传送到公共地标（可能收费）"));
         src.sendSystemMessage(MessageUtil.parse("&e/warp add <名称> [费用] &7添加公共地标（管理员）"));
+        src.sendSystemMessage(MessageUtil.parse("&e/warp rename <旧名称> <新名称> &7重命名公共地标（管理员）"));
         src.sendSystemMessage(MessageUtil.parse("&e/warp del <名称> &7删除公共地标（管理员）"));
+        src.sendSystemMessage(MessageUtil.parse("&7名称支持中文（名称含空格时请加引号）"));
         src.sendSystemMessage(MessageUtil.parse("&6=================================="));
         return 1;
     }

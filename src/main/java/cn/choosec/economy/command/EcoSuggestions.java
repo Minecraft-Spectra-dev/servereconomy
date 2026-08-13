@@ -13,6 +13,7 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
@@ -29,6 +30,20 @@ public final class EcoSuggestions {
 
     private static CompletableFuture<Suggestions> of(List<String> values, SuggestionsBuilder b) {
         return SharedSuggestionProvider.suggest(values, b);
+    }
+
+    /**
+     * Suggest landmark names without Brigadier's automatic quoting, so typed CJK
+     * prefixes still match. Names containing whitespace are quoted instead.
+     */
+    public static CompletableFuture<Suggestions> landmarkNames(Collection<String> names, SuggestionsBuilder b) {
+        for (String name : names) {
+            boolean hasWhitespace = name.codePoints().anyMatch(Character::isWhitespace);
+            b.suggest(hasWhitespace
+                    ? com.mojang.brigadier.arguments.StringArgumentType.escapeIfRequired(name)
+                    : name);
+        }
+        return b.buildFuture();
     }
 
     /** Currently configured sellable (recyclable) item ids. */
@@ -64,12 +79,22 @@ public final class EcoSuggestions {
 
     /** Existing public landmark names. */
     public static CompletableFuture<Suggestions> publicLandmarks(SuggestionsBuilder b) {
-        return of(LandmarkService.listPublic().stream().map(lm -> lm.name()).collect(Collectors.toList()), b);
+        return landmarkNames(LandmarkService.listPublic().stream().map(lm -> lm.name()).toList(), b);
     }
 
     /** Active market listing ids. */
     public static CompletableFuture<Suggestions> listingIds(SuggestionsBuilder b) {
         return of(TradeService.listListings().stream().map(l -> String.valueOf(l.id())).collect(Collectors.toList()), b);
+    }
+
+    /** Active market listing ids owned by the player executing the command. */
+    public static CompletableFuture<Suggestions> myListingIds(CommandContext<CommandSourceStack> ctx, SuggestionsBuilder b) {
+        ServerPlayer p = ctx.getSource().getPlayer();
+        if (p == null) {
+            return of(List.of(), b);
+        }
+        return of(TradeService.listBySeller(p.getUUID()).stream()
+                .map(l -> String.valueOf(l.id())).collect(Collectors.toList()), b);
     }
 
     /** Existing sellable/task targets + curated target list by task type. */

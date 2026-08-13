@@ -208,19 +208,11 @@ public final class LandmarkService {
 
     public static synchronized Landmark getPublic(String name) {
         try (Connection c = DatabaseManager.open()) {
-            try (PreparedStatement ps = c.prepareStatement("""
-                    SELECT * FROM landmarks WHERE name = ? AND is_public = 1""")) {
-                ps.setString(1, name);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        return row(rs);
-                    }
-                }
-            }
+            return getPublic(c, name);
         } catch (SQLException e) {
             DatabaseManager.log(e);
+            return null;
         }
-        return null;
     }
 
     public static synchronized List<Landmark> listPublic() {
@@ -259,7 +251,41 @@ public final class LandmarkService {
         }
     }
 
+    /** Rename a public landmark. Returns false when the old name is missing or the new name is already taken. */
+    public static synchronized boolean renamePublic(String oldName, String newName) {
+        try (Connection c = DatabaseManager.open()) {
+            if (getPublic(c, oldName) == null || getPublic(c, newName) != null) {
+                return false;
+            }
+            try (PreparedStatement ps = c.prepareStatement("""
+                    UPDATE landmarks SET name = ? WHERE name = ? AND is_public = 1""")) {
+                ps.setString(1, newName);
+                ps.setString(2, oldName);
+                if (ps.executeUpdate() > 0) {
+                    invalidatePublic();
+                    return true;
+                }
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        return false;
+    }
+
     /* ---------------- internals ---------------- */
+
+    private static Landmark getPublic(Connection c, String name) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("""
+                SELECT * FROM landmarks WHERE name = ? AND is_public = 1""")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    return row(rs);
+                }
+            }
+        }
+        return null;
+    }
 
     private static HomeLocation getHome(Connection c, UUID uuid, String name) throws SQLException {
         try (PreparedStatement ps = c.prepareStatement("""

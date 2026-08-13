@@ -16,7 +16,6 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
-import net.minecraft.commands.SharedSuggestionProvider;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.network.chat.ClickEvent;
@@ -83,19 +82,19 @@ public final class LegacyCommands {
         // /home, /sethome, /delhome, /homes, /renamehome
         d.register(Commands.literal("home")
                 .executes(ctx -> executeHomeTp(ctx))
-                .then(Commands.argument("name", StringArgumentType.word()).suggests(homeSuggestions())
+                .then(Commands.argument("name", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
                         .executes(ctx -> executeHomeTp(ctx))));
         d.register(Commands.literal("sethome")
                 .executes(ctx -> executeHomeAdd(ctx))
-                .then(Commands.argument("name", StringArgumentType.word()).executes(ctx -> executeHomeAdd(ctx))));
+                .then(Commands.argument("name", LandmarkNameArgumentType.name()).executes(ctx -> executeHomeAdd(ctx))));
         d.register(Commands.literal("delhome")
                 .executes(ctx -> executeHomeDel(ctx))
-                .then(Commands.argument("name", StringArgumentType.word()).suggests(homeSuggestions())
+                .then(Commands.argument("name", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
                         .executes(ctx -> executeHomeDel(ctx))));
         d.register(Commands.literal("homes").executes(ctx -> executeHomeList(ctx)));
         d.register(Commands.literal("renamehome")
-                .then(Commands.argument("old", StringArgumentType.word()).suggests(homeSuggestions())
-                        .then(Commands.argument("new", StringArgumentType.word())
+                .then(Commands.argument("old", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
+                        .then(Commands.argument("new", LandmarkNameArgumentType.name())
                                 .executes(ctx -> executeHomeRename(ctx)))));
 
         // /back, /hat
@@ -321,7 +320,7 @@ public final class LegacyCommands {
                 return builder.buildFuture();
             }
             Map<String, HomeLocation> homes = LandmarkService.listHomes(player.getUUID());
-            return SharedSuggestionProvider.suggest(homes.keySet(), builder);
+            return EcoSuggestions.landmarkNames(homes.keySet(), builder);
         };
     }
 
@@ -329,7 +328,11 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String name = "name".equals(lastNode(ctx)) ? StringArgumentType.getString(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
+        if (name.isEmpty()) {
+            CommandUtil.failure(src, "&c名称不能为空！");
+            return 0;
+        }
         int max = LandmarkService.personalLimit(player.getUUID());
         Map<String, HomeLocation> homes = LandmarkService.listHomes(player.getUUID());
         if (!homes.containsKey(name) && homes.size() >= max) {
@@ -351,7 +354,7 @@ public final class LegacyCommands {
 
         ServerPlayer player = src.getPlayerOrException();
         MinecraftServer server = src.getServer();
-        String name = "name".equals(lastNode(ctx)) ? StringArgumentType.getString(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
         HomeLocation loc = LandmarkService.getHome(player.getUUID(), name);
         if (loc == null) {
             CommandUtil.failure(src, "&c传送点 &e" + name + " &c不存在！用 /homes 查看所有传送点。");
@@ -395,7 +398,7 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String name = "name".equals(lastNode(ctx)) ? StringArgumentType.getString(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
         if (!LandmarkService.removeHome(player.getUUID(), name)) {
             CommandUtil.failure(src, "&c传送点 &e" + name + " &c不存在！");
             return 0;
@@ -408,8 +411,16 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String oldName = StringArgumentType.getString(ctx, "old");
-        String newName = StringArgumentType.getString(ctx, "new");
+        String oldName = LandmarkNameArgumentType.getName(ctx, "old");
+        String newName = LandmarkNameArgumentType.getName(ctx, "new");
+        if (oldName.isEmpty() || newName.isEmpty()) {
+            CommandUtil.failure(src, "&c名称不能为空！");
+            return 0;
+        }
+        if (oldName.equals(newName)) {
+            CommandUtil.failure(src, "&c新旧名称相同！");
+            return 0;
+        }
         if (!LandmarkService.renameHome(player.getUUID(), oldName, newName)) {
             CommandUtil.failure(src, "&c传送点 &e" + oldName + " &c不存在或 &e" + newName + " &c已存在！");
             return 0;

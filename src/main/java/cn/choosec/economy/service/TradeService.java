@@ -298,14 +298,19 @@ public final class TradeService {
         String name = owner.getName().getString();
         boolean buy = "BUY".equalsIgnoreCase(l.type());
         BigDecimal escrow = null;
+        ItemStack template = null;
         if (buy) {
             escrow = l.price().multiply(BigDecimal.valueOf(addCount))
                     .setScale(MoneyUtil.SCALE, MoneyUtil.ROUNDING);
             if (EconomyService.remove(owner.getUUID(), name, escrow, "restock escrow #" + id) == null) {
                 return RestockResult.NO_FUNDS;
             }
-        } else if (!hasItems(owner, l.itemId(), addCount)) {
-            return RestockResult.NO_ITEMS;
+        } else {
+            // 补货需要与订单完全相同的物品（含 NBT/组件），且可从整个背包取
+            template = buildItem(l, owner.level().getServer().registryAccess());
+            if (template.isEmpty() || countExactItems(owner, template) < addCount) {
+                return RestockResult.NO_ITEMS;
+            }
         }
         boolean updated = false;
         try (Connection c = DatabaseManager.open()) {
@@ -325,7 +330,7 @@ public final class TradeService {
             return RestockResult.ERROR;
         }
         if (!buy) {
-            List<ItemStack> taken = removeItems(owner, l.itemId(), addCount);
+            List<ItemStack> taken = removeExactItems(owner, template, addCount);
             if (taken == null) {
                 // Defensive: roll the count back rather than losing player items.
                 try (Connection c = DatabaseManager.open();
@@ -606,6 +611,66 @@ public final class TradeService {
             }
         }
         return need <= 0;
+    }
+
+    /** Count items in the player's main inventory that are identical (item + components) to {@code template}. */
+    public static int countExactItems(ServerPlayer p, ItemStack template) {
+        int total = 0;
+        for (ItemStack slot : p.getInventory().getNonEquipmentItems()) {
+            if (!slot.isEmpty() && ItemStack.isSameItemSameComponents(template, slot)) {
+                total += slot.getCount();
+            }
+        }
+        return total;
+    }
+
+    /**
+     * Remove up to {@code count} items identical to {@code template} from the
+     * player's main inventory, taking the held (selected) stack first and then the
+     * rest of the backpack. Returns the removed stacks, or {@code null} (leaving
+     * the inventory unchanged) when fewer than {@code count} identical items exist.
+     */
+    public static List<ItemStack> removeExactItems(ServerPlayer p, ItemStack template, int count) {
+        List<ItemStack> items = p.getInventory().getNonEquipmentItems();
+        List<ItemStack> removed = new ArrayList<>();
+        int selected = p.getInventory().getSelectedSlot();
+        int need = count;
+        if (selected >= 0 && selected < items.size()) {
+            need = takeExact(items.get(selected), template, need, removed);
+        }
+        for (int i = 0; i < items.size() && need > 0; i++) {
+            if (i == selected) {
+                continue;
+            }
+            need = takeExact(items.get(i), template, need, removed);
+        }
+        if (need > 0) {
+            // Should not happen when countExactItems() was checked first; restore defensively.
+            returnItems(p, removed);
+            return null;
+        }
+        p.getInventory().setChanged();
+        return removed;
+    }
+
+    /** Return previously removed stacks to the player's inventory (rollback helper). */
+    public static void returnItems(ServerPlayer p, List<ItemStack> stacks) {
+        for (ItemStack stack : stacks) {
+            p.getInventory().add(stack);
+        }
+        p.getInventory().setChanged();
+    }
+
+    private static int takeExact(ItemStack slot, ItemStack template, int need, List<ItemStack> removed) {
+        if (need <= 0 || slot.isEmpty() || !ItemStack.isSameItemSameComponents(template, slot)) {
+            return need;
+        }
+        int take = Math.min(need, slot.getCount());
+        ItemStack copy = slot.copy();
+        copy.setCount(take);
+        removed.add(copy);
+        slot.shrink(take);
+        return need - take;
     }
 
     /** True if the player's inventory has at least {@code count} items matching {@code itemId} (by id). */
