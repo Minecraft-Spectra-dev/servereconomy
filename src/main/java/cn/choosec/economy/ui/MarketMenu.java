@@ -35,9 +35,10 @@ import net.minecraft.world.item.component.ItemLore;
  * <p>The first five rows show the current page's listings (SELL and BUY/求购).
  * The bottom row is a control bar: left-click the arrows to flip pages, the
  * filter button cycles 全部/出售/求购, the sort button cycles 最新/价格升序/价格降序
- * and the middle slot shows the current page. Left/shift-clicking a SELL order
- * buys it; clicking a BUY order fulfils it. The listing area is read-only (no
- * item can be taken out).
+ * and the middle slot shows the current page. Clicking a listing (left, right,
+ * shift — any click) selects it and closes the GUI, then the quantity is typed
+ * in chat (buy for SELL orders, supply for BUY orders); only one selection is
+ * allowed at a time. The listing area is read-only (no item can be taken out).
  */
 public class MarketMenu extends ChestMenu {
 
@@ -183,11 +184,10 @@ public class MarketMenu extends ChestMenu {
         if (buy) {
             BigDecimal escrow = l.price().multiply(BigDecimal.valueOf(l.count()));
             BigDecimal receive = MoneyUtil.minusPercent(escrow, ConfigManager.get().rates.tradeFeePercent);
-            lines.add(MessageUtil.parse("&8点击供货，可收到货款 &e" + MoneyUtil.format(receive) + " " + cur));
+            lines.add(MessageUtil.parse("&8点击选中后输入供货数量，可收到货款 &e" + MoneyUtil.format(receive) + " " + cur));
         } else {
-            lines.add(MessageUtil.parse("&8点击购买该物品"));
+            lines.add(MessageUtil.parse("&8点击选中后输入购买数量"));
         }
-        lines.add(MessageUtil.parse("&8Shift+点击可输入数量"));
         return new ItemLore(lines);
     }
 
@@ -209,17 +209,16 @@ public class MarketMenu extends ChestMenu {
             if (p instanceof ServerPlayer sp) {
                 if (slotId >= ITEM_SLOTS) {
                     handleControl(sp, slotId);
-                } else if (input == ContainerInput.PICKUP) {
-                    // 普通左键：整单购买/供货
-                    int idx = page * PAGE_SIZE + slotId;
-                    if (idx < view.size()) {
-                        process(view.get(idx).id(), sp);
-                    }
-                } else if (input == ContainerInput.QUICK_MOVE) {
-                    // Shift 点击：输入购买/供货数量
-                    int idx = page * PAGE_SIZE + slotId;
-                    if (idx < view.size()) {
-                        requestQuantity(view.get(idx).id(), sp);
+                } else {
+                    // 左键 / Shift / 右键等所有点击一视同仁：选中该商品后，在聊天栏输入购买/供货数量
+                    if (MarketInput.hasPending(sp.getUUID())) {
+                        // 防止一键整理/连点等误操作选中多个商品
+                        sp.sendSystemMessage(MessageUtil.parse("&c你已有待输入的操作，请先输入 &e0/c &c取消后再选择其它商品！"));
+                    } else {
+                        int idx = page * PAGE_SIZE + slotId;
+                        if (idx < view.size()) {
+                            requestQuantity(view.get(idx), sp);
+                        }
                     }
                 }
                 // Push the authoritative menu state immediately so the client's
@@ -236,19 +235,29 @@ public class MarketMenu extends ChestMenu {
         return ItemStack.EMPTY; // the whole menu is read-only
     }
 
-    /** Shift-click on a listing: close the GUI and wait for a typed quantity via chat. */
-    private void requestQuantity(int orderId, ServerPlayer sp) {
-        TradeService.Listing l = TradeService.getListing(orderId);
-        if (l == null) {
+    /** Click a listing: close the GUI and wait for a typed quantity via chat. */
+    private void requestQuantity(TradeService.Listing l, ServerPlayer sp) {
+        TradeService.Listing fresh = TradeService.getListing(l.id());
+        if (fresh == null) {
             sp.sendSystemMessage(MessageUtil.parse("&c该订单已不存在。"));
+            reloadAll();
             return;
         }
-        boolean supply = "BUY".equalsIgnoreCase(l.type());
-        MarketInput.setPending(sp.getUUID(), orderId, supply ? Action.SUPPLY : Action.BUY);
+        boolean supply = "BUY".equalsIgnoreCase(fresh.type());
+        MarketInput.setPending(sp.getUUID(), fresh.id(), supply ? Action.SUPPLY : Action.BUY);
         sp.closeContainer();
-        sp.sendSystemMessage(MessageUtil.parse((supply ? "&e请输入要&a供货&e的数量（最多 &a" + l.count()
-                : "&e请输入要&a购买&e的数量（最多 &a" + l.count())
-                + "&e），直接发一条聊天消息即可，输入 &c0/c&e 取消："));
+        // 选中提示：展示商品详细信息，再让玩家输入数量
+        ItemStack item = TradeService.buildItem(fresh, sp.level().getServer().registryAccess());
+        String itemName = item.isEmpty() ? fresh.itemId() : item.getHoverName().getString();
+        String cur = ConfigManager.get().currencyAbbreviation;
+        sp.sendSystemMessage(MessageUtil.parse("&6===== 选中" + (supply ? "供货订单" : "购买订单") + " #" + fresh.id() + " ====="));
+        sp.sendSystemMessage(MessageUtil.parse("&f" + itemName + " &7x" + fresh.count()
+                + " &7· 单价 &6" + MoneyUtil.format(fresh.price()) + " " + cur
+                + " &7· " + (supply ? "还需" : "剩余") + " &f" + fresh.count()));
+        sp.sendSystemMessage(MessageUtil.parse("&7商家 &f" + TradeService.sellerName(sp.level().getServer(), fresh.seller())));
+        sp.sendSystemMessage(MessageUtil.parse(supply
+                ? "&e请输入要&a供货&e的数量（最多 &a" + fresh.count() + "&e），直接发一条聊天消息即可，输入 &c0/c&e 取消："
+                : "&e请输入要&a购买&e的数量（最多 &a" + fresh.count() + "&e），直接发一条聊天消息即可，输入 &c0/c&e 取消："));
     }
 
     private void handleControl(ServerPlayer sp, int slotId) {
@@ -269,30 +278,5 @@ public class MarketMenu extends ChestMenu {
             rebuildView();
             refresh();
         }
-    }
-
-    private void process(int orderId, ServerPlayer sp) {
-        TradeService.Listing l = TradeService.getListing(orderId);
-        if (l == null) {
-            sp.sendSystemMessage(MessageUtil.parse("&c该订单已不存在。"));
-        } else if ("BUY".equalsIgnoreCase(l.type())) {
-            switch (TradeService.fulfill(sp, orderId)) {
-                case SUCCESS -> sp.sendSystemMessage(MessageUtil.parse("&a已供货并收到货款！"));
-                case NO_ITEMS -> sp.sendSystemMessage(MessageUtil.parse("&c背包中没有足够的物品！"));
-                case NOT_BUY_ORDER -> sp.sendSystemMessage(MessageUtil.parse("&c该订单不是求购单！"));
-                case INVALID_COUNT -> sp.sendSystemMessage(MessageUtil.parse("&c数量无效！"));
-                default -> sp.sendSystemMessage(MessageUtil.parse("&c供货失败！"));
-            }
-        } else {
-            switch (TradeService.buy(sp, orderId)) {
-                case SUCCESS -> sp.sendSystemMessage(MessageUtil.parse("&a购买成功！"));
-                case NO_FUNDS -> sp.sendSystemMessage(MessageUtil.parse("&c余额不足！"));
-                case NO_SPACE -> sp.sendSystemMessage(MessageUtil.parse("&c背包空间不足！"));
-                case OWN_ITEM -> sp.sendSystemMessage(MessageUtil.parse("&c不能购买自己的物品！"));
-                case INVALID_COUNT -> sp.sendSystemMessage(MessageUtil.parse("&c数量无效！"));
-                default -> sp.sendSystemMessage(MessageUtil.parse("&c购买失败！"));
-            }
-        }
-        reloadAll();
     }
 }

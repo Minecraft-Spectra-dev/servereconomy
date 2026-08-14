@@ -83,6 +83,12 @@ public final class ConfigManager {
         if (r.accountSlotPrice == null) r.accountSlotPrice = new EconomyConfig.Rates().accountSlotPrice;
         if (r.landmarkSlotPrice == null) r.landmarkSlotPrice = new EconomyConfig.Rates().landmarkSlotPrice;
         if (r.flightPerSecond == null) r.flightPerSecond = new EconomyConfig.Rates().flightPerSecond;
+        if (r.titleFirstPurchase == null || r.titleFirstPurchase.compareTo(BigDecimal.ZERO) < 0) {
+            r.titleFirstPurchase = BigDecimal.ZERO;
+        }
+        if (r.titleChange == null || r.titleChange.compareTo(BigDecimal.ZERO) < 0) {
+            r.titleChange = BigDecimal.ZERO;
+        }
         if (r.tradeFeePercent == null || r.tradeFeePercent.compareTo(BigDecimal.ZERO) < 0) {
             r.tradeFeePercent = BigDecimal.ZERO;
         } else if (r.tradeFeePercent.compareTo(new BigDecimal("100")) > 0) {

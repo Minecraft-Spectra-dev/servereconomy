@@ -9,6 +9,7 @@ import cn.choosec.economy.service.DailyTaskService;
 import cn.choosec.economy.service.LandmarkService;
 import cn.choosec.economy.service.MailboxService;
 import cn.choosec.economy.service.PlayerService;
+import cn.choosec.economy.service.PreservedService;
 import cn.choosec.economy.service.SellService;
 import cn.choosec.economy.service.TaskService;
 import cn.choosec.economy.service.TradeService;
@@ -110,6 +111,13 @@ public final class EconomyCommands {
         d.register(Commands.literal("accountslot")
                 .then(Commands.literal("buy").executes(ctx -> buyAccountSlot(ctx))));
 
+        // buy / change a personal title (首次500，后续每次改200，可在配置中调整)
+        d.register(Commands.literal("buytitle")
+                .executes(ctx -> buyTitleInfo(ctx))
+                .then(Commands.literal("clear").executes(ctx -> buyTitleClear(ctx)))
+                .then(Commands.argument("text", StringArgumentType.greedyString())
+                        .executes(ctx -> buyTitle(ctx))));
+
         // tasks
         d.register(Commands.literal("task").executes(ctx -> taskDaily(ctx)));
 
@@ -190,6 +198,23 @@ public final class EconomyCommands {
                                 .executes(ctx -> ecoSet(ctx)))))
                 .then(Commands.literal("reload").executes(ctx -> ecoReload(ctx)))
                 .then(Commands.literal("stats").executes(ctx -> ecoStats(ctx)))
+                .then(Commands.literal("tab")
+                        .then(Commands.literal("header")
+                                .then(Commands.argument("text", StringArgumentType.greedyString())
+                                        .executes(ctx -> ecoTab(ctx, true))))
+                        .then(Commands.literal("footer")
+                                .then(Commands.argument("text", StringArgumentType.greedyString())
+                                        .executes(ctx -> ecoTab(ctx, false))))
+                        .then(Commands.literal("clear")
+                                .then(Commands.literal("header").executes(ctx -> ecoTabClear(ctx, true)))
+                                .then(Commands.literal("footer").executes(ctx -> ecoTabClear(ctx, false)))
+                                .then(Commands.literal("all").executes(ctx -> ecoTabClearAll(ctx)))))
+                .then(Commands.literal("title")
+                        .then(Commands.argument("targets", EntityArgument.players())
+                                .then(Commands.literal("set")
+                                        .then(Commands.argument("text", StringArgumentType.greedyString())
+                                                .executes(ctx -> ecoTitleSet(ctx))))
+                                .then(Commands.literal("clear").executes(ctx -> ecoTitleClear(ctx)))))
                 .then(Commands.literal("homelimit").then(Commands.argument("player", StringArgumentType.word()).suggests(EcoSuggestions::playerNames)
                         .then(Commands.argument("amount", IntegerArgumentType.integer(0, 100))
                                 .executes(ctx -> ecoHomeLimit(ctx)))))
@@ -466,12 +491,91 @@ public final class EconomyCommands {
         return 1;
     }
 
+    /* ---------------- buy title ---------------- */
 
+    private static int buyTitleInfo(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        ServerPlayer p = src.getPlayerOrException();
+        String cur = ConfigManager.get().currencyAbbreviation;
+        BigDecimal first = ConfigManager.get().rates.titleFirstPurchase;
+        BigDecimal change = ConfigManager.get().rates.titleChange;
+        String current = PreservedService.getTitle(p.getUUID());
+        src.sendSystemMessage(MessageUtil.parse("&6======= 称号购买 /buytitle ======="));
+        src.sendSystemMessage(MessageUtil.parse("&e当前称号：" + (current == null || current.isEmpty() ? "&7（无）" : "&f" + current)));
+        src.sendSystemMessage(MessageUtil.parse("&e/buytitle <称号>  &7设置/修改称号：首次 &a" + MoneyUtil.format(first) + " " + cur
+                + "&7，之后每次 &a" + MoneyUtil.format(change) + " " + cur));
+        src.sendSystemMessage(MessageUtil.parse("&e/buytitle clear  &7免费清除称号"));
+        src.sendSystemMessage(MessageUtil.parse("&7称号支持 &f& &7颜色码与 <gradient:#A:#B:...#C>文本</gradient> 多色渐变（三色及以上）"));
+        src.sendSystemMessage(MessageUtil.parse("&6=================================="));
+        return 1;
+    }
 
+    private static int buyTitle(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        ServerPlayer p = src.getPlayerOrException();
+        String text = StringArgumentType.getString(ctx, "text").trim();
+        if (text.isEmpty()) {
+            CommandUtil.failure(src, "&c称号不能为空！");
+            return 0;
+        }
+        String cur = ConfigManager.get().currencyAbbreviation;
+        boolean first = !PlayerService.titlePurchased(p.getUUID());
+        BigDecimal cost = first
+                ? ConfigManager.get().rates.titleFirstPurchase
+                : ConfigManager.get().rates.titleChange;
+        if (cost.compareTo(BigDecimal.ZERO) <= 0) {
+            CommandUtil.failure(src, "&c称号价格未配置（rates.titleFirstPurchase / titleChange）！");
+            return 0;
+        }
+        try (Connection c = DatabaseManager.open()) {
+            c.setAutoCommit(false);
+            try {
+                if (EconomyService.remove(p.getUUID(), p.getName().getString(), cost, "buy title") == null) {
+                    c.rollback();
+                    CommandUtil.failure(src, "&c余额不足！" + (first ? "首次购买称号" : "修改称号") + "需要 &e"
+                            + MoneyUtil.format(cost) + " " + cur + "，当前余额 &e"
+                            + MoneyUtil.format(EconomyService.getBalance(p.getUUID(), p.getName().getString())) + " " + cur);
+                    return 0;
+                }
+                if (first) {
+                    PlayerService.markTitlePurchased(p.getUUID());
+                }
+                c.commit();
+            } catch (SQLException e) {
+                c.rollback();
+                EconomyService.invalidateCache(p.getUUID());
+                DatabaseManager.log(e);
+                CommandUtil.failure(src, "&c购买失败，请重试！");
+                return 0;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            CommandUtil.failure(src, "&c购买失败，请重试！");
+            return 0;
+        }
+        PreservedService.setTitle(p.getUUID(), text);
+        PreservedService.updatePlayerDisplayName(p);
+        PreservedService.saveTitles();
+        CommandUtil.successQuiet(src, "&a已" + (first ? "购买" : "修改") + "称号：&f" + text
+                + " &7（花费 &e" + MoneyUtil.format(cost) + " " + cur + "&7）");
+        return 1;
+    }
 
-
-
-
+    private static int buyTitleClear(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        ServerPlayer p = src.getPlayerOrException();
+        if (!PreservedService.hasTitle(p.getUUID())) {
+            CommandUtil.failure(src, "&c你当前没有称号！");
+            return 0;
+        }
+        PreservedService.removeTitle(p.getUUID());
+        PreservedService.updatePlayerDisplayName(p);
+        PreservedService.saveTitles();
+        CommandUtil.successQuiet(src, "&c已清除你的称号（免费）。");
+        return 1;
+    }
 
     /* ---------------- tasks ---------------- */
 
@@ -940,6 +1044,77 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c配置加载失败！");
         }
         return 1;
+    }
+
+    private static int ecoTab(CommandContext<CommandSourceStack> ctx, boolean header) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (!opOrFail(src)) return 0;
+        setTabText(src, header, StringArgumentType.getString(ctx, "text"));
+        return 1;
+    }
+
+    private static int ecoTabClear(CommandContext<CommandSourceStack> ctx, boolean header) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (!opOrFail(src)) return 0;
+        setTabText(src, header, "");
+        return 1;
+    }
+
+    private static int ecoTabClearAll(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (!opOrFail(src)) return 0;
+        PreservedService.headerText = "";
+        PreservedService.footerText = "";
+        ConfigManager.save();
+        refreshTab(src.getServer());
+        CommandUtil.success(src, "&a已清除 Tab 头部和尾部文本。");
+        return 1;
+    }
+
+    private static void setTabText(CommandSourceStack src, boolean header, String text) {
+        if (header) {
+            PreservedService.headerText = text;
+        } else {
+            PreservedService.footerText = text;
+        }
+        ConfigManager.save();
+        refreshTab(src.getServer());
+        CommandUtil.success(src, header ? "&a已设置 Tab 头部文本。" : "&a已设置 Tab 尾部文本。");
+    }
+
+    private static void refreshTab(MinecraftServer server) {
+        if (server == null) return;
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            PreservedService.clearTabCache(player.getUUID());
+            PreservedService.updateTabForPlayer(player);
+        }
+    }
+
+    private static int ecoTitleSet(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (!opOrFail(src)) return 0;
+        String text = StringArgumentType.getString(ctx, "text");
+        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "targets");
+        for (ServerPlayer target : targets) {
+            PreservedService.setTitle(target.getUUID(), text);
+            PreservedService.updatePlayerDisplayName(target);
+        }
+        PreservedService.saveTitles();
+        CommandUtil.success(src, "&a已为 &e" + targets.size() + " &a名玩家设置称号。");
+        return targets.size();
+    }
+
+    private static int ecoTitleClear(CommandContext<CommandSourceStack> ctx) throws CommandSyntaxException {
+        CommandSourceStack src = ctx.getSource();
+        if (!opOrFail(src)) return 0;
+        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "targets");
+        for (ServerPlayer target : targets) {
+            PreservedService.removeTitle(target.getUUID());
+            PreservedService.updatePlayerDisplayName(target);
+        }
+        PreservedService.saveTitles();
+        CommandUtil.success(src, "&a已清除 &e" + targets.size() + " &a名玩家的称号。");
+        return targets.size();
     }
 
     private static int ecoStats(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {

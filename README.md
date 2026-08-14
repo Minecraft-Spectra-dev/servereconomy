@@ -1,10 +1,10 @@
 # ServerEconomy（服务器经济系统）
 
-一个 **Fabric 服务端**经济模组，面向 **Minecraft 26.2**（要求 **Java 25** 与 **Fabric API**）。它为服务器提供完整的货币经济体系：**收入**（每日任务、工程验收、物品回收、交易）、**支出**（假人计费、飞行计费、地标、额外账号槽位、交易手续费）、以及玩家间的**转账、红包与交易市场**。
+一个 **Fabric 服务端**经济模组，面向 **Minecraft 26.2**（要求 **Java 25** 与 **Fabric API**）。它提供完整的货币经济体系：**收入**（每日任务、工程验收、物品回收、交易）、**支出**（假人计费、飞行计费、地标、额外账号槽位、交易手续费），以及玩家间的**转账、红包与交易市场**。
 
-它**直接替换并完全兼容原 `ServerRules` 模组**：Tab 列表、称号、TPA、家/个人地标、返回、戴帽子等原功能与体验完全保留，并在此基础上叠加经济系统。旧数据不再自动迁移，需按 [七、旧数据恢复（手动）](#data-migration) 手动恢复。
+此外还提供 Tab 列表、称号、TPA、家、返回和戴帽子等服务器常用功能。
 
-> 本模组仅需装在**服务端**，客户端无需安装。
+> 本模组仅需安装在**服务端**，客户端无需安装。
 > 货币默认名称为 **dollar（$）**，精度默认 **2 位小数**，均可配置（见 [配置](#config)）。
 
 ---
@@ -18,9 +18,20 @@
 - **红包**：拼手气 / 普通均分，聊天栏一键抢。
 - **消耗项**：假人计费、飞行按秒计费、公共地标、额外账号槽位、扩充个人地标。
 - **点对点转账**：`/pay` 无手续费。
-- **完全保留原 ServerRules 功能**：tab、称号、TPA、家、back、hat。
+- **服务器常用功能**：Tab 列表、称号、TPA、家、返回、戴帽子。
 
 ---
+
+## 安装与快速开始
+
+1. 准备 Minecraft 26.2、Fabric Loader 0.19.3 或更高版本、Fabric API，以及 Java 25 或更高版本。
+2. 将 `servereconomy-<version>.jar` 放入服务端 `mods/` 目录。
+3. 启动服务器，模组会自动生成 `config/servereconomy.json` 和默认 SQLite 数据库。
+4. 按需调整货币、费率、任务、回收和数据库配置。
+5. 重启服务器，或由 OP/控制台执行 `/eco reload` 应用支持热加载的配置。
+6. 管理员可使用 `/eco recycle add ...` 配置可回收物品，并使用 `/warp add ...` 配置公共地标。
+
+> 本模组为服务端模组，客户端无需安装。
 
 # 🎮 玩家指南
 
@@ -58,11 +69,12 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| **假人计费** | 每名玩家免费 **2** 个假人，超出部分按 **/小时/个** 计费（默认 5$/时/个）。已与 **Carpet** 联动，自动识别在线假人并按持有者计费，无需手动命令；召唤第 2 个及以上时会自动提示。 |
+| **假人计费** | 每名玩家免费 **2** 个假人，超出部分按 **/小时/个** 计费（默认 5$/时/个）。安装 **Carpet** 时，模组会尝试识别在线假人并按持有者计费，无需手动命令；召唤超出免费额度的假人时会提示。不同 Carpet 版本若无法解析持有者，会回退到假人自身 UUID。 |
 | **额外账号槽位** | 免费 **1** 个，超出部分可用 `/accountslot buy` 一次性购买（默认 2000$/个）。 |
 | **飞行权限** | `/fly` 开关；开启后按**秒**实时扣费（默认 0.01$/秒，高精度扣除）。余额不足会自动禁用飞行。 |
 | **公共地标** | 传送到服务器设置的公共地标需消耗货币，见 `/warp list`。 |
 | **个人地标** | 默认 **5** 个，可用 `/buyhome [数量]` 以货币扩充（默认 200$/个）；传送个人地标免费。 |
+| **称号** | 用 `/buytitle <称号>` 自助购买/修改称号：首次 **500$**，之后每次修改 **200$**（可在配置调整）；`/buytitle clear` 免费清除。称号支持 `&` 颜色码与 `<gradient:#A:#B:...#C>` 多色渐变（三色及以上）。 |
 | **交易手续费** | 玩家市场成交金额 **2%** 作为手续费归服务器（卖家实收 98%）。 |
 
 ## 四、家 / 个人地标
@@ -79,18 +91,19 @@
 
 原版箱子界面，`/market` 打开。格子显示**原始物品（NBT 完整保留）**，tooltip 追加价格 / 数量 / 商家。
 
-- **出售**：手持物品 `/market sell <单价> [数量]`（数量可超过一组，手持不足时自动从背包取走完全相同的物品），买家点击购买。
+- **出售**：手持物品 `/market sell <单价> [数量]`（数量可超过一组，手持不足时自动从背包取走完全相同的物品），买家点击商品即可选中。
 - **求购**：`/market buylist <单价> [数量] [物品id]`（**物品可留空**，留空时按手持物品收购），发布时**预支货款托管**；`/market fulfill <id>` 供货收款；`/market cancel <id>` 取消并**全额退回**。
 - `/market list`：查看所有在售/求购订单；`/market buy <id>` 购买；`/market fulfill <id>` 供货。
+- **购买/供货数量**：在 `/market` 界面点击任意商品即**选中**该商品，随后关闭界面并在**聊天栏输入数量**（购买出售单 / 向求购单供货）；一次只允许选中一个商品，避免误操作。聊天提示会展示该商品的详细信息（物品名、单价、数量、商家）。
 - 界面底部按钮：**筛选**（全部 → 出售 → 求购）与**排序**（最新 → 价格从低到高 → 价格从高到低），点击即可切换；默认不筛选、按最新排序。
 - `/mymarket`：打开「我的商品」界面，可对自己的订单进行 **下架 / 改价 / 补货**（改价与补货会在聊天栏输入数值），也可用 `/market restock <id> [数量]` 直接补货；补货与上架一样会从背包取走完全相同的物品。
 - 求购到货等物品会进入**邮箱**：`/mails` 打开邮箱领取（离线或背包满时也会暂存在邮箱）。
 - 成交金额 **2%** 作为手续费归服务器。
 
-## 六、保留的原 ServerRules 功能
+## 六、服务器常用功能
 
-- **Tab 列表**：由管理员设置上/下行文本。
-- **称号**：由管理员设置，聊天、名字、tab 均显示称号前缀。
+- **Tab 列表**：管理员使用 `/eco tab header <文本>` 和 `/eco tab footer <文本>` 设置头部/尾部文本；使用 `/eco tab clear <header|footer|all>` 清除。
+- **称号**：管理员使用 `/eco title <玩家> set <称号>` 设置、`/eco title <玩家> clear` 清除；玩家可用 `/buytitle <称号>` 自助购买/修改（首次 **500**，之后每次 **200**，可配置），`/buytitle clear` 免费清除；聊天、名字、Tab 均显示称号前缀，玩家参数支持选择器。称号文本支持 `&` 颜色码与 `<gradient:#A:#B:...#C>` 多色渐变（**三色及以上**）。
 - **TPA**：`/tpa <玩家>`、`/tpahere <玩家>`、`/tpaccept`、`/tpdeny`、`/tpacancel`（2 分钟过期，带同意/拒绝按钮）。
 - **返回**：`/back`（死亡或传送后记录）。
 - **戴帽子**：`/hat`。
@@ -99,6 +112,7 @@
 
 ```
 /balance /bal /money          查看余额
+/baltop                       查看余额排行榜
 /pay <玩家> <金额>            转账（无手续费）
 /redpacket lucky|normal <总额> <份数>   发红包
 /redpacket grab <id>          抢红包
@@ -116,6 +130,8 @@
 /mails                        打开邮箱
 /fly                          飞行开关（按秒扣费）
 /buyhome [数量]              扩充个人地标槽位（默认 1 个）
+/buytitle <称号>              购买/修改称号（首次 500，之后每次 200）
+/buytitle clear               清除称号（免费）
 /accountslot buy              购买额外账号槽位
 /build submit <x> <y> <z> [说明]   提交工程验收申请
 /warp list                    查看公共地标
@@ -140,6 +156,11 @@
 /eco set   <玩家> <金额>       设置余额
 /eco reload                   重新加载配置（热重载）
 /eco stats                    经济概况（账户数、总发行量、回收、在售、启用任务）
+/eco tab header <文本>         设置 Tab 头部文本
+/eco tab footer <文本>         设置 Tab 尾部文本
+/eco tab clear <header|footer|all>  清除 Tab 文本
+/eco title <玩家> set <称号>    设置玩家称号（支持选择器）
+/eco title <玩家> clear         清除玩家称号（支持选择器）
 /eco log <玩家>                查看玩家流水（最近 20 条）
 /eco homelimit <玩家> <数量>    设置个人地标上限
 /eco buildlist                查看待验收的工程申请
@@ -202,19 +223,23 @@
 
 ## 五、配置
 
-配置文件为服务端 `config/servereconomy.json`，首次启动自动生成，修改后用 `/eco reload` 热重载。
+配置文件为服务端 `config/servereconomy.json`，首次启动自动生成。修改后由 OP 或控制台执行 `/eco reload` 重新加载配置。
+
+> 注意：`currencyDecimals` 只在服务器启动时初始化，修改该字段需要重启服务器；其它费率、任务和回收配置可通过 `/eco reload` 重新读取。金额精度目前限制为 `0`～`2` 位小数。管理员命令仅 OP 或控制台可执行。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `currencyName` | `dollar` | 货币名称 |
 | `currencyAbbreviation` | `$` | 货币缩写 |
-| `currencyDecimals` | `2` | 金额小数精度 |
+| `currencyDecimals` | `2` | 金额小数精度（支持 `0`～`2`，修改后需重启） |
 | `scoreboardLanguage` | `zh_cn` | 每日任务计分板语言（`zh_cn` / `en_us`） |
-| `tabHeader` / `tabFooter` | `""` | Tab 列表上/下行（可由迁移或管理员设置） |
+| `tabHeader` / `tabFooter` | `""` | Tab 列表头部/尾部文本，也可用 `/eco tab` 管理 |
 | `rates.fakePlayerHourly` | `5.00` | 超额假人每小时费用（每个） |
 | `rates.accountSlotPrice` | `2000.00` | 每个额外账号槽位价格 |
 | `rates.landmarkSlotPrice` | `200.00` | 每个扩充个人地标槽位价格 |
 | `rates.flightPerSecond` | `0.01` | 飞行每秒费用 |
+| `rates.titleFirstPurchase` | `500.00` | 玩家首次购买称号费用（/buytitle） |
+| `rates.titleChange` | `200.00` | 玩家之后每次修改称号费用（/buytitle） |
 | `rates.tradeFeePercent` | `2.00` | 市场成交手续费百分比（卖家实收 98%） |
 | `rates.publicLandmarkCost` | `1.00` | 公共地标默认传送费用（新建地标未指定时的默认值） |
 | `rates.taskReachRadius` | `8` | `reach` 任务判定半径（格） |
@@ -227,15 +252,16 @@
 | `sell.dynamicPricing` | `true` | 是否按供应量动态调价 |
 | `sellableItems` | `[]` | 可回收物品列表（默认空，需管理员添加） |
 | `database` | 见下 | 数据库后端配置 |
+| `database.transactionRetentionDays` | `90` | 流水保留天数；启动时清理更早记录，设为 `0` 表示永久保留 |
 
 ## 六、数据库后端
 
 - **SQLite（默认）**：本地文件 `config/servereconomy/economy.db`，无需额外配置。
-- **MySQL（可选）**：在 `servereconomy.json` 的 `database` 段配置：
+- **MySQL（可选）**：在 `servereconomy.json` 的 `database` 段配置。使用 MySQL 前请先创建数据库（schema），模组启动时会自动建表：
 
 ```json
 "database": {
-  "type": "sqlite",
+  "type": "mysql",
   "host": "127.0.0.1",
   "port": 3306,
   "database": "servereconomy",
@@ -245,24 +271,14 @@
 }
 ```
 - `type`：`"sqlite"`（默认，本地文件，其它配置忽略）或 `"mysql"`。
-- 使用 MySQL 时：数据库（schema）需**预先创建**，模组启动时自动建表；`extraParams` 为追加到 JDBC URL 的额外连接参数（`&` 分隔）。
-- SQLite 与 MySQL 的表结构/行为一致，切换后端无需改动命令或玩法。
+- 使用 MySQL 时，数据库（schema）需**预先创建**；`extraParams` 为追加到 JDBC URL 的额外连接参数（`&` 分隔）。
+- 请使用专用数据库账号，并不要把生产密码提交到 Git 仓库；切换 SQLite / MySQL 前请先备份数据。
+- SQLite 与 MySQL 的表结构/行为一致，切换后端无需改动命令或玩法；但数据库中的已有数据不会自动迁移。
 
 ### 数据表
 余额 `balances`、流水 `transactions`、回收供应 `supply`、地标 `landmarks`、玩家元数据 `player_meta`、称号 `titles`、任务池 `tasks`、每日任务 `daily_tasks`、市场 `market_listings`、红包 `redpackets` / `redpacket_taken`、邮箱 `mailbox`、工程验收 `build_requests`。
 
-<a id="data-migration"></a>
-
-## 七、旧数据恢复（手动）
-
-本模组不再自动读取原 ServerRules 的旧配置，旧数据需手动恢复：
-
-- 称号：在服务器控制台（或由 OP 对在线玩家）执行 `/serverrules title set <玩家名> <称号文本>`；称号文本沿用旧版 `&` 颜色码与 `<gradient:#颜色1:#颜色2>文本</gradient>` 渐变标签格式。
-- Tab 头/尾：用 `/serverrules tab 1 <文本>`、`/serverrules tab 2 <文本>` 重新设置。
-- 家（homes）与家数量上限（maxHomes）：分别用 `/sethome`、`/eco homelimit <玩家> <数量>` 重新设置。
-
-
-## 八、构建与部署
+## 七、构建与部署
 
 ```
 ./gradlew build
@@ -271,7 +287,7 @@
 
 ### 运行测试
 
-- `./gradlew test`：纯逻辑单元测试 + 基于临时 SQLite 库的集成测试。
+- `./gradlew test`：运行单元测试和 SQLite 集成测试；MySQL 集成测试在数据库不可用时会自动跳过。
 - MySQL 集成测试默认连接 `127.0.0.1:3306`（root / 空密码），连接失败时**自动跳过**而不使构建失败；连接参数可用 `-P` 覆盖，例如：
   ```
   ./gradlew test -Pservereconomy.test.mysql.host=127.0.0.1 -Pservereconomy.test.mysql.port=3307 \
@@ -279,9 +295,9 @@
   ```
   测试会重建专用的 `servereconomy_test` 数据库，请勿指向生产库。
 
-本仓库已使用 Linux JDK 25 对照真实服务端 `server-26.2.jar`、Fabric API、Mixin、SQLite 编译通过，并打包为 `build/libs/servereconomy-1.0.0.jar`。
+CI 使用 Ubuntu 和 Java 25 执行 `./gradlew build`，构建产物位于 `build/libs/`，文件名格式为 `servereconomy-<version>.jar`。
 
-## 九、目录结构
+## 八、目录结构
 
 ```
 src/main/java/cn/choosec/economy/

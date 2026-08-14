@@ -8,6 +8,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.lang.reflect.Proxy;
@@ -248,9 +250,11 @@ public final class DatabaseManager {
                 purchased_slots INTEGER NOT NULL DEFAULT 0,
                 purchased_home_slots INTEGER NOT NULL DEFAULT 0,
                 fake_players_active INTEGER NOT NULL DEFAULT 0,
-                home_limit_override INTEGER
+                home_limit_override INTEGER,
+                title_purchased INTEGER NOT NULL DEFAULT 0
             );
             """);
+        ensurePlayerMetaTitleColumn(st.getConnection());
         st.executeUpdate("""
             CREATE TABLE IF NOT EXISTS titles (
                 uuid TEXT PRIMARY KEY,
@@ -420,9 +424,11 @@ public final class DatabaseManager {
                 purchased_slots INT NOT NULL DEFAULT 0,
                 purchased_home_slots INT NOT NULL DEFAULT 0,
                 fake_players_active INT NOT NULL DEFAULT 0,
-                home_limit_override INT
+                home_limit_override INT,
+                title_purchased INT NOT NULL DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """);
+        ensurePlayerMetaTitleColumn(st.getConnection());
         st.executeUpdate("""
             CREATE TABLE IF NOT EXISTS titles (
                 uuid VARCHAR(36) PRIMARY KEY,
@@ -533,6 +539,40 @@ public final class DatabaseManager {
         createIndex(st, "idx_notifications_owner", "notifications (owner)");
         createIndex(st, "idx_build_requests_player", "build_requests (player)");
         createIndex(st, "idx_balances_name", "balances (name)");
+    }
+
+    /**
+     * Add the {@code title_purchased} column to an existing {@code player_meta}
+     * table created by an older version of the mod (CREATE TABLE IF NOT EXISTS
+     * never alters a table that already exists). Safe to call on every startup.
+     */
+    private static void ensurePlayerMetaTitleColumn(Connection c) throws SQLException {
+        boolean found = false;
+        if (dialect == Dialect.MYSQL) {
+            try (PreparedStatement ps = c.prepareStatement("""
+                    SELECT COUNT(*) FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'player_meta'
+                      AND COLUMN_NAME = 'title_purchased'""")) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    found = rs.next() && rs.getInt(1) > 0;
+                }
+            }
+        } else {
+            try (PreparedStatement ps = c.prepareStatement("PRAGMA table_info(player_meta)");
+                 ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    if ("title_purchased".equalsIgnoreCase(rs.getString("name"))) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) {
+            try (Statement st = c.createStatement()) {
+                st.executeUpdate("ALTER TABLE player_meta ADD COLUMN title_purchased INTEGER NOT NULL DEFAULT 0");
+            }
+        }
     }
 
     private static void createIndex(Statement st, String name, String spec) throws SQLException {

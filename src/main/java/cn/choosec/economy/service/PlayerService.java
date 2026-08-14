@@ -129,6 +129,32 @@ public final class PlayerService {
         }
     }
 
+    /* ---------------- purchased titles ---------------- */
+
+    /** True if the player has ever bought a title with /buytitle (pricing tier). */
+    public static synchronized boolean titlePurchased(UUID uuid) {
+        try (Connection c = DatabaseManager.open()) {
+            return intCol(c, uuid, "title_purchased") > 0;
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return false;
+        }
+    }
+
+    /** Mark a player as having bought a title (first purchase is pricier). */
+    public static synchronized void markTitlePurchased(UUID uuid) {
+        try (Connection c = DatabaseManager.open()) {
+            ensureRow(c, uuid);
+            try (PreparedStatement ps = c.prepareStatement("""
+                    UPDATE player_meta SET title_purchased = 1 WHERE uuid = ?""")) {
+                ps.setString(1, uuid.toString());
+                ps.executeUpdate();
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+    }
+
     /* ---------------- internals ---------------- */
 
     private static int intCol(Connection c, UUID uuid, String col) throws SQLException {

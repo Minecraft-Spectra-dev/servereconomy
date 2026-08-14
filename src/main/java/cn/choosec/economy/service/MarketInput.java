@@ -36,6 +36,11 @@ public final class MarketInput {
         pending.put(uuid, new Pending(orderId, action));
     }
 
+    /** True if the player already has a pending typed-number request. */
+    public static boolean hasPending(UUID uuid) {
+        return pending.containsKey(uuid);
+    }
+
     /** Remove and return the pending request for a player, or null. */
     public static Pending poll(UUID uuid) {
         return pending.remove(uuid);

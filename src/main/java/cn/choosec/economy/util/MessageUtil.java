@@ -23,8 +23,13 @@ import java.util.regex.Pattern;
  */
 public final class MessageUtil {
 
+    /**
+     * Matches {@code <gradient:#RRGGBB:#RRGGBB:...>text</gradient>} (and the
+     * shorter {@code <g:...>} alias) with any number of colour stops — two for
+     * a simple gradient, three or more for multi-colour transitions.
+     */
     private static final Pattern GRADIENT_PATTERN =
-            Pattern.compile("<(gradient|g):#([0-9a-fA-F]{6}):#([0-9a-fA-F]{6})>(.*?)</\\1>");
+            Pattern.compile("<(gradient|g):((?:#[0-9a-fA-F]{6})(?::#[0-9a-fA-F]{6})*)>(.*?)</\\1>");
 
     private MessageUtil() {
     }
@@ -37,26 +42,62 @@ public final class MessageUtil {
         return parseFormatCodes(processGradientTags(text), '\u00a7', '&');
     }
 
-    private static String processGradientTags(String text) {
+    /**
+     * Expand every gradient tag into per-character hex colour codes. With N
+     * colour stops the text is interpolated across N-1 segments, so the first
+     * stop shades into the second, then into the third, and so on.
+     */
+    static String processGradientTags(String text) {
         Matcher matcher = GRADIENT_PATTERN.matcher(text);
         StringBuffer sb = new StringBuffer();
         while (matcher.find()) {
-            String startHex = matcher.group(2);
-            String endHex = matcher.group(3);
-            String content = matcher.group(4);
-            int startColor = Integer.parseInt(startHex, 16);
-            int endColor = Integer.parseInt(endHex, 16);
+            String tag = matcher.group(0);
+            String content = matcher.group(3);
+            int[] colors = parseGradientColors(matcher.group(2));
+            if (colors.length == 0) {
+                matcher.appendReplacement(sb, Matcher.quoteReplacement(tag));
+                continue;
+            }
             StringBuilder gradient = new StringBuilder();
             int len = content.length();
             for (int i = 0; i < len; i++) {
-                float t = len > 1 ? (float) i / (float) (len - 1) : 0.0f;
-                int color = lerpColor(startColor, endColor, t);
-                gradient.append("&#").append(String.format("%06x", color)).append(content.charAt(i));
+                gradient.append("&#").append(String.format("%06x", gradientColor(colors, len, i)))
+                        .append(content.charAt(i));
             }
             matcher.appendReplacement(sb, Matcher.quoteReplacement(gradient.toString()));
         }
         matcher.appendTail(sb);
         return sb.toString();
+    }
+
+    /**
+     * Split a gradient colour spec ({@code "#aabbcc:#ddeeff:..."}) into RGB
+     * ints. The caller guarantees the spec matches {@code (#[0-9a-fA-F]{6})+}.
+     */
+    private static int[] parseGradientColors(String spec) {
+        String[] parts = spec.split(":");
+        int[] colors = new int[parts.length];
+        for (int i = 0; i < parts.length; i++) {
+            String hex = parts[i].startsWith("#") ? parts[i].substring(1) : parts[i];
+            colors[i] = Integer.parseInt(hex, 16);
+        }
+        return colors;
+    }
+
+    /**
+     * Colour for character {@code index} of a {@code len}-character gradient.
+     * Single-stop gradients keep one colour; multi-stop gradients interpolate
+     * across the stops in order.
+     */
+    private static int gradientColor(int[] colors, int len, int index) {
+        if (colors.length == 1) {
+            return colors[0];
+        }
+        float t = len > 1 ? (float) index / (float) (len - 1) : 0.0f;
+        float scaled = t * (colors.length - 1);
+        int seg = Math.min((int) scaled, colors.length - 2);
+        float local = scaled - seg;
+        return lerpColor(colors[seg], colors[seg + 1], local);
     }
 
     private static int lerpColor(int from, int to, float t) {

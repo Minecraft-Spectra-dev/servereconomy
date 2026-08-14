@@ -18,7 +18,7 @@ public class EconomyConfig {
     /** Decimal precision used for all money arithmetic/display. */
     public int currencyDecimals = 2;
 
-    /** Tab-list header/footer (set via the /serverrules tab command). */
+    /** Tab-list header/footer (set by the server administrator). */
     public String tabHeader = "";
     public String tabFooter = "";
 
@@ -70,6 +70,10 @@ public class EconomyConfig {
         public BigDecimal landmarkSlotPrice = new BigDecimal("200.00");
         /** Price of flight permission per second (real-time deduction). */
         public BigDecimal flightPerSecond = new BigDecimal("0.01");
+        /** Price of the first title a player buys with /buytitle. */
+        public BigDecimal titleFirstPurchase = new BigDecimal("500.00");
+        /** Price of each later title change/re-buy with /buytitle. */
+        public BigDecimal titleChange = new BigDecimal("200.00");
         /** Trade fee, as a percentage (e.g. 2 means 2%). */
         public BigDecimal tradeFeePercent = new BigDecimal("2.00");
         /** Default cost to teleport to a public landmark (0 = free). */

@@ -1,15 +1,11 @@
 package cn.choosec.economy.command;
 
-import cn.choosec.economy.config.ConfigManager;
 import cn.choosec.economy.model.HomeLocation;
 import cn.choosec.economy.service.LandmarkService;
-import cn.choosec.economy.service.PreservedService;
 import cn.choosec.economy.util.MessageUtil;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
-import com.mojang.brigadier.arguments.IntegerArgumentType;
-import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
 import com.mojang.brigadier.suggestion.SuggestionsBuilder;
@@ -32,7 +28,6 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
@@ -40,8 +35,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Preserved ServerRules commands. Behaviour and messages match the original mod
- * exactly so the existing player experience is unchanged.
+ * Server utility commands for teleport requests, homes, back, hats, titles and tab list.
  */
 public final class LegacyCommands {
 
@@ -56,19 +50,6 @@ public final class LegacyCommands {
     }
 
     public static void register(CommandDispatcher<CommandSourceStack> d) {
-        // /serverrules tab|title
-        d.register(Commands.literal("serverrules")
-                .then(Commands.literal("tab")
-                        .then(Commands.argument("line", IntegerArgumentType.integer(1, 2))
-                                .then(Commands.argument("text", StringArgumentType.greedyString())
-                                        .executes(ctx -> executeTab(ctx)))))
-                .then(Commands.literal("title")
-                        .then(Commands.argument("target", EntityArgument.players())
-                                .then(Commands.literal("set")
-                                        .then(Commands.argument("text", StringArgumentType.greedyString())
-                                                .executes(ctx -> executeTitleSet(ctx))))
-                                .then(Commands.literal("clear").executes(ctx -> executeTitleClear(ctx))))));
-
         // /tpa, /tpahere, /tpaccept, /tpdeny, /tpacancel
         d.register(Commands.literal("tpa")
                 .then(Commands.argument("target", EntityArgument.player()).executes(ctx -> executeTpa(ctx))
@@ -100,77 +81,6 @@ public final class LegacyCommands {
         // /back, /hat
         d.register(Commands.literal("back").executes(ctx -> executeBack(ctx)));
         d.register(Commands.literal("hat").executes(ctx -> executeHat(ctx)));
-    }
-
-    /* ---------------- tab ---------------- */
-
-    private static int executeTab(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
-        CommandSourceStack src = ctx.getSource();
-
-        if (!CommandUtil.isOp(src)) {
-            CommandUtil.failure(src, "&c需要管理员权限！");
-            return 0;
-        }
-        int line = IntegerArgumentType.getInteger(ctx, "line");
-        String text = StringArgumentType.getString(ctx, "text");
-        if (line == 1) {
-            PreservedService.headerText = text;
-        } else {
-            PreservedService.footerText = text;
-        }
-        ConfigManager.save();
-        MinecraftServer server = src.getServer();
-        if (server != null) {
-            for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-                PreservedService.updateTabForPlayer(player);
-            }
-        }
-        String lineLabel = line == 1 ? "header" : "footer";
-        CommandUtil.success(src, "&aServerRules: Tab " + lineLabel + " set successfully!");
-        return 1;
-    }
-
-    /* ---------------- title ---------------- */
-
-    private static int executeTitleSet(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
-        CommandSourceStack src = ctx.getSource();
-
-        if (!CommandUtil.isOp(src)) {
-            CommandUtil.failure(src, "&c需要管理员权限！");
-            return 0;
-        }
-        String text = StringArgumentType.getString(ctx, "text");
-        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "target");
-        int count = 0;
-        for (ServerPlayer target : targets) {
-            PreservedService.setTitle(target.getUUID(), text);
-            PreservedService.updatePlayerDisplayName(target);
-            count++;
-        }
-        saveTitles();
-        int finalCount = count;
-        src.sendSuccess(() -> Component.literal("ServerRules: Set title for " + finalCount + " player(s)!"), true);
-        return finalCount;
-    }
-
-    private static int executeTitleClear(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
-        CommandSourceStack src = ctx.getSource();
-
-        if (!CommandUtil.isOp(src)) {
-            CommandUtil.failure(src, "&c需要管理员权限！");
-            return 0;
-        }
-        Collection<ServerPlayer> targets = EntityArgument.getPlayers(ctx, "target");
-        int count = 0;
-        for (ServerPlayer target : targets) {
-            PreservedService.removeTitle(target.getUUID());
-            PreservedService.updatePlayerDisplayName(target);
-            count++;
-        }
-        saveTitles();
-        int finalCount = count;
-        src.sendSuccess(() -> Component.literal("ServerRules: Cleared title for " + finalCount + " player(s)!"), true);
-        return finalCount;
     }
 
     /* ---------------- tpa ---------------- */
@@ -486,7 +396,4 @@ public final class LegacyCommands {
         return ctx.getNodes().get(ctx.getNodes().size() - 1).getNode().getName();
     }
 
-    private static void saveTitles() {
-        PreservedService.saveTitles();
-    }
 }
