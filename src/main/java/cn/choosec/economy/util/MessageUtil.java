@@ -47,10 +47,16 @@ public final class MessageUtil {
      * Render an item stack as the vanilla item chat component (bracketed,
      * rarity-coloured name with the item hover tooltip). Falls back to the raw
      * item id when the stack is empty, so chat lines never degrade to a blank.
+     *
+     * <p>The hover payload uses a count-1 copy: market listings may bundle more
+     * than one stack (for example 132 shulker boxes), and the chat item codec
+     * only accepts counts within the item's valid stack range.
      */
     public static Component itemInChat(ItemStack stack, String fallbackId) {
         if (stack != null && !stack.isEmpty()) {
-            return stack.getDisplayName();
+            ItemStack display = stack.copy();
+            display.setCount(1);
+            return display.getDisplayName();
         }
         return parse("&f" + fallbackId);
     }
