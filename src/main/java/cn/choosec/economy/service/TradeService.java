@@ -163,6 +163,45 @@ public final class TradeService {
         return listingCache;
     }
 
+    /**
+     * List one page of listings for {@code /market list}, newest first.
+     * Unlike {@link #listListings()} this query is not capped so every page of
+     * the market is reachable.
+     */
+    public static synchronized List<Listing> listListings(int offset, int limit) {
+        List<Listing> result = new ArrayList<>();
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT * FROM market_listings ORDER BY id DESC LIMIT ? OFFSET ?")) {
+                ps.setInt(1, limit);
+                ps.setInt(2, offset);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        result.add(row(rs));
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        return result;
+    }
+
+    /** Total number of active market listings (used to compute /market list pages). */
+    public static synchronized int countListings() {
+        try (Connection c = DatabaseManager.open()) {
+            try (PreparedStatement ps = c.prepareStatement(
+                    "SELECT COUNT(*) FROM market_listings")) {
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next() ? rs.getInt(1) : 0;
+                }
+            }
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return 0;
+        }
+    }
+
     /** List a single seller's listings for the management UI (newest first). */
     public static synchronized List<Listing> listBySeller(UUID seller) {
         List<Listing> result = new ArrayList<>();

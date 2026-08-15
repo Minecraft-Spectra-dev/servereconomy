@@ -8,6 +8,7 @@ import net.minecraft.network.chat.TextColor;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.item.ItemStack;
 import cn.choosec.economy.config.ConfigManager;
 import cn.choosec.economy.economy.EconomyService;
 import cn.choosec.economy.economy.MoneyUtil;
@@ -40,6 +41,18 @@ public final class MessageUtil {
             return Component.empty();
         }
         return parseFormatCodes(processGradientTags(text), '\u00a7', '&');
+    }
+
+    /**
+     * Render an item stack as the vanilla item chat component (bracketed,
+     * rarity-coloured name with the item hover tooltip). Falls back to the raw
+     * item id when the stack is empty, so chat lines never degrade to a blank.
+     */
+    public static Component itemInChat(ItemStack stack, String fallbackId) {
+        if (stack != null && !stack.isEmpty()) {
+            return stack.getDisplayName();
+        }
+        return parse("&f" + fallbackId);
     }
 
     /**

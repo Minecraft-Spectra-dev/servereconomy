@@ -30,9 +30,11 @@ import net.minecraft.commands.arguments.DimensionArgument;
 import net.minecraft.commands.arguments.EntityArgument;
 import net.minecraft.commands.arguments.IdentifierArgument;
 import net.minecraft.commands.arguments.coordinates.Vec3Argument;
+import net.minecraft.core.RegistryAccess;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.Identifier;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
@@ -55,6 +57,9 @@ import java.util.UUID;
 
 /** New economy commands: balances, pay, sell, eco admin, landmarks, homes expansion, slots, fly, dummies, tasks, marketplace. */
 public final class EconomyCommands {
+
+    /** Fixed page size for {@code /market list}. */
+    private static final int MARKET_LIST_PAGE_SIZE = 10;
 
     private EconomyCommands() {
     }
@@ -139,7 +144,10 @@ public final class EconomyCommands {
                         .then(Commands.argument("count", IntegerArgumentType.integer(1))
                                 .executes(ctx -> marketSell(ctx)))
                         .executes(ctx -> marketSell(ctx))))
-                .then(Commands.literal("list").executes(ctx -> marketList(ctx)))
+                .then(Commands.literal("list")
+                        .executes(ctx -> marketList(ctx))
+                        .then(Commands.argument("page", IntegerArgumentType.integer(1))
+                                .executes(ctx -> marketList(ctx))))
                 .then(Commands.literal("buy").then(Commands.argument("id", IntegerArgumentType.integer(1))
                         .suggests((ctx, b) -> EcoSuggestions.listingIds(b))
                         .executes(ctx -> marketBuy(ctx))))
@@ -667,20 +675,35 @@ public final class EconomyCommands {
     private static int marketList(CommandContext<CommandSourceStack> ctx)  throws CommandSyntaxException {
         CommandSourceStack src = ctx.getSource();
 
-        List<TradeService.Listing> listings = TradeService.listListings();
-        if (listings.isEmpty()) {
+        int page = lastNode(ctx).equals("page") ? IntegerArgumentType.getInteger(ctx, "page") : 1;
+        int total = TradeService.countListings();
+        if (total == 0) {
             CommandUtil.successQuiet(src, "&e当前没有上架物品。");
             return 1;
         }
+        int totalPages = Math.max(1, (total + MARKET_LIST_PAGE_SIZE - 1) / MARKET_LIST_PAGE_SIZE);
+        if (page > totalPages) {
+            CommandUtil.failure(src, "&c页码超出范围！当前共 &e" + totalPages + " &c页。");
+            return 0;
+        }
+        List<TradeService.Listing> listings = TradeService.listListings(
+                (page - 1) * MARKET_LIST_PAGE_SIZE, MARKET_LIST_PAGE_SIZE);
         src.sendSystemMessage(MessageUtil.parse("&6======= 交易市场 &6======="));
+        src.sendSystemMessage(MessageUtil.parse("&7第 &f" + page + "&7/&f" + totalPages
+                + " &7页 · 共 &f" + total + " &7条订单 · 每页 &f" + MARKET_LIST_PAGE_SIZE + " &7条"));
+        RegistryAccess reg = src.getServer().registryAccess();
         for (TradeService.Listing l : listings) {
             boolean buy = "BUY".equalsIgnoreCase(l.type());
-            src.sendSystemMessage(MessageUtil.parse((buy ? "&b[求购] " : "&a[出售] ") + "&e#" + l.id() + " &f" + l.count() + "x "
-                    + l.itemId() + " &7单价 &a" + MoneyUtil.format(l.price()) + " "
-                    + ConfigManager.get().currencyAbbreviation + " &7商家 "
-                    + TradeService.sellerName(ctx.getSource().getServer(), l.seller())
+            MutableComponent line = MessageUtil.parse((buy ? "&b[求购] " : "&a[出售] ")
+                    + "&e#" + l.id() + " ").copy();
+            line.append(MessageUtil.itemInChat(TradeService.buildItem(l, reg), l.itemId()));
+            line.append(MessageUtil.parse(" &7x" + l.count() + " &7单价 &a"
+                    + MoneyUtil.format(l.price()) + " " + ConfigManager.get().currencyAbbreviation
+                    + " &7商家 " + TradeService.sellerName(src.getServer(), l.seller())
                     + " &7" + (buy ? "/market fulfill " : "/market buy ") + l.id()));
+            src.sendSystemMessage(line);
         }
+        src.sendSystemMessage(MessageUtil.parse("&7输入 &e/market list <页码> &7翻页"));
         src.sendSystemMessage(MessageUtil.parse("&6================================"));
         return 1;
     }

@@ -16,6 +16,7 @@ import java.util.stream.Collectors;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.SimpleContainer;
@@ -246,14 +247,16 @@ public class MarketMenu extends ChestMenu {
         boolean supply = "BUY".equalsIgnoreCase(fresh.type());
         MarketInput.setPending(sp.getUUID(), fresh.id(), supply ? Action.SUPPLY : Action.BUY);
         sp.closeContainer();
-        // 选中提示：展示商品详细信息，再让玩家输入数量
+        // 选中提示：展示商品详细信息（物品以聊天框物品形式展示），再让玩家输入数量
         ItemStack item = TradeService.buildItem(fresh, sp.level().getServer().registryAccess());
-        String itemName = item.isEmpty() ? fresh.itemId() : item.getHoverName().getString();
         String cur = ConfigManager.get().currencyAbbreviation;
         sp.sendSystemMessage(MessageUtil.parse("&6===== 选中" + (supply ? "供货订单" : "购买订单") + " #" + fresh.id() + " ====="));
-        sp.sendSystemMessage(MessageUtil.parse("&f" + itemName + " &7x" + fresh.count()
+        MutableComponent detail = MessageUtil.parse("&f").copy();
+        detail.append(MessageUtil.itemInChat(item, fresh.itemId()));
+        detail.append(MessageUtil.parse(" &7x" + fresh.count()
                 + " &7· 单价 &6" + MoneyUtil.format(fresh.price()) + " " + cur
                 + " &7· " + (supply ? "还需" : "剩余") + " &f" + fresh.count()));
+        sp.sendSystemMessage(detail);
         sp.sendSystemMessage(MessageUtil.parse("&7商家 &f" + TradeService.sellerName(sp.level().getServer(), fresh.seller())));
         sp.sendSystemMessage(MessageUtil.parse(supply
                 ? "&e请输入要&a供货&e的数量（最多 &a" + fresh.count() + "&e），直接发一条聊天消息即可，输入 &c0/c&e 取消："
