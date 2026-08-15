@@ -55,6 +55,14 @@ abstract class AbstractEconomyServiceTest {
     }
 
     @Test
+    void asyncVariantsRunOnTheDatabaseWorker() {
+        assertTrue(EconomyService.set(ALICE, "Alice", new BigDecimal("10.00"), "init"));
+        assertEquals(new BigDecimal("25.00"), EconomyService.addAsync(ALICE, "Alice", new BigDecimal("15.00"), "async gift").join());
+        assertEquals(new BigDecimal("25.00"), EconomyService.getBalanceAsync(ALICE, "Alice").join());
+        assertEquals(new BigDecimal("20.00"), EconomyService.removeAsync(ALICE, "Alice", new BigDecimal("5.00"), "async spend").join());
+    }
+
+    @Test
     void transferChargesFeeToBank() {
         EconomyService.set(ALICE, "Alice", new BigDecimal("100.00"), "init");
         EconomyService.set(BOB, "Bob", new BigDecimal("0.00"), "init");

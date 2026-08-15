@@ -48,6 +48,37 @@ public class ServerEconomy implements ModInitializer {
     /** Current server instance, used to resolve online players from balance events. */
     private static volatile MinecraftServer server;
 
+    /** The active {@link MinecraftServer}, or null before startup / after stop. */
+    public static MinecraftServer getServer() {
+        return server;
+    }
+
+    /** True when the calling thread is the Minecraft server (main) thread. */
+    public static boolean isServerThread() {
+        MinecraftServer srv = server;
+        return srv != null && srv.isSameThread();
+    }
+
+    /**
+     * Run an action on the server thread. Actions originating on asynchronous
+     * database callbacks must use this before touching players/world state.
+     */
+    public static void runOnServer(Runnable action) {
+        MinecraftServer srv = server;
+        if (srv == null) {
+            return;
+        }
+        if (srv.isSameThread()) {
+            action.run();
+            return;
+        }
+        try {
+            srv.execute(action);
+        } catch (RuntimeException e) {
+            // Server is stopping; the action is no longer needed.
+        }
+    }
+
     @Override
     public void onInitialize() {
         LOGGER.info("ServerEconomy initializing...");
@@ -118,6 +149,7 @@ public class ServerEconomy implements ModInitializer {
         ServerLifecycleEvents.SERVER_STARTING.register(ServerEconomy::onServerStarting);
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> {
             EconomyTicker.flushAllFlight(server);
+            DailyTaskService.flushProgressSync();
             ServerEconomy.server = null;
             DatabaseManager.close();
         });
@@ -135,10 +167,14 @@ public class ServerEconomy implements ModInitializer {
             ConfigManager.init(configDir);
             DatabaseManager.init(configDir, ConfigManager.get().database);
             PreservedService.loadTitles();
-            int purged = EconomyService.purgeOldTransactions(ConfigManager.get().database.transactionRetentionDays);
-            if (purged > 0) {
-                LOGGER.info("[ServerEconomy] Purged {} stale transaction rows", purged);
-            }
+            // Transaction purge can scan a large table on a remote MySQL server;
+            // run it on the database worker instead of delaying server start.
+            EconomyService.purgeOldTransactionsAsync(ConfigManager.get().database.transactionRetentionDays)
+                    .thenAccept(purged -> {
+                        if (purged > 0) {
+                            LOGGER.info("[ServerEconomy] Purged {} stale transaction rows", purged);
+                        }
+                    });
             LOGGER.info("ServerEconomy ready (config={}, db={})", configDir.resolve("servereconomy.json"),
                     ConfigManager.get().database.type);
         } catch (Exception e) {

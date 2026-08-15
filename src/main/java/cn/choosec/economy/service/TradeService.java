@@ -120,7 +120,9 @@ public final class TradeService {
             }
         } catch (SQLException e) {
             DatabaseManager.log(e);
-            EconomyService.add(creator.getUUID(), creator.getName().getString(), escrow, "buy-order escrow refund");
+            // Queue the refund: the watchdog guard may be rejecting synchronous
+            // calls right now, but the escrow must never be lost.
+            EconomyService.addAsync(creator.getUUID(), creator.getName().getString(), escrow, "buy-order escrow refund");
         }
         return -1;
     }
@@ -310,9 +312,9 @@ public final class TradeService {
         if (!updated) {
             // Compensate the escrow adjustment so money and price stay consistent.
             if (escrowDelta.compareTo(BigDecimal.ZERO) > 0) {
-                EconomyService.add(owner.getUUID(), name, escrowDelta, "reprice escrow rollback #" + id);
+                EconomyService.addAsync(owner.getUUID(), name, escrowDelta, "reprice escrow rollback #" + id);
             } else if (escrowDelta.compareTo(BigDecimal.ZERO) < 0) {
-                EconomyService.remove(owner.getUUID(), name, escrowDelta.negate(), "reprice escrow rollback #" + id);
+                EconomyService.removeAsync(owner.getUUID(), name, escrowDelta.negate(), "reprice escrow rollback #" + id);
             }
             return RepriceResult.ERROR;
         }
@@ -364,7 +366,7 @@ public final class TradeService {
         }
         if (!updated) {
             if (escrow != null) {
-                EconomyService.add(owner.getUUID(), name, escrow, "restock escrow rollback #" + id);
+                EconomyService.addAsync(owner.getUUID(), name, escrow, "restock escrow rollback #" + id);
             }
             return RestockResult.ERROR;
         }

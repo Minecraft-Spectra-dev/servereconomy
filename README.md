@@ -272,6 +272,8 @@
 ```
 - `type`：`"sqlite"`（默认，本地文件，其它配置忽略）或 `"mysql"`。
 - 使用 MySQL 时，数据库（schema）需**预先创建**；`extraParams` 为追加到 JDBC URL 的额外连接参数（`&` 分隔）。
+- 所有 SQL 都在专用后台线程执行，服务端主线程只会做有上限的等待；数据库卡顿时会触发熔断快速失败，避免服务器 Watchdog 崩溃。飞行扣费、每日任务进度等高频路径已改为异步/批量落库。
+- 未在 `extraParams` 中显式配置时，MySQL 连接会自动追加 `connectTimeout=5000&socketTimeout=30000`，防止数据库 Worker 被卡死。
 - 请使用专用数据库账号，并不要把生产密码提交到 Git 仓库；切换 SQLite / MySQL 前请先备份数据。
 - SQLite 与 MySQL 的表结构/行为一致，切换后端无需改动命令或玩法；但数据库中的已有数据不会自动迁移。
 

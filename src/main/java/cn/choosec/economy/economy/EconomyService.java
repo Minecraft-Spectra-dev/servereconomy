@@ -1,6 +1,5 @@
 package cn.choosec.economy.economy;
 
-import cn.choosec.economy.config.ConfigManager;
 import cn.choosec.economy.database.DatabaseManager;
 
 import java.math.BigDecimal;
@@ -12,6 +11,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -22,6 +22,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * (has/get/set/add/remove/transfer) so it is familiar to server admins and
  * easy to bridge to other economy plugins. Balances are stored as fixed-precision
  * DECIMAL(20,2) values.
+ *
+ * <p>Every public operation executes as a whole on {@link DatabaseManager}'s
+ * dedicated database worker, so a slow MySQL server can never make the Minecraft
+ * server thread execute JDBC I/O. Callers that already run on the database
+ * worker (for example asynchronous ticker flushes) execute inline instead of
+ * queueing behind themselves. Async variants return {@link CompletableFuture}s
+ * for high-frequency server-thread paths.
  */
 public final class EconomyService {
 
@@ -32,6 +39,9 @@ public final class EconomyService {
 
     /** In-memory balance cache, updated/invalidated on every mutation. */
     private static final Map<UUID, BigDecimal> BALANCE_CACHE = new ConcurrentHashMap<>();
+
+    /** In-flight async balance loads, keyed by UUID so a slow MySQL query is only queued once. */
+    private static final Map<UUID, CompletableFuture<BigDecimal>> BALANCE_LOADS = new ConcurrentHashMap<>();
 
     /** Listener notified with the new balance after every successful mutation. */
     public interface BalanceListener {
@@ -68,33 +78,226 @@ public final class EconomyService {
     private static final long NAME_CACHE_TTL_MS = 30_000L;
 
     /** Get a player's balance (read-only; does not create the account row). The {@code name} parameter is kept for API compatibility and ignored. */
-    public static synchronized BigDecimal getBalance(UUID uuid, String name) {
+    public static BigDecimal getBalance(UUID uuid, String name) {
         BigDecimal cached = BALANCE_CACHE.get(uuid);
         if (cached != null) {
             return cached;
         }
+        try {
+            return DatabaseManager.call(() -> loadBalance(uuid));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+        }
+        return zeroBalance();
+    }
+
+    /**
+     * Asynchronous balance lookup for server-thread tick paths. A cache hit
+     * completes immediately; a miss is loaded on the database worker and cached.
+     */
+    public static CompletableFuture<BigDecimal> getBalanceAsync(UUID uuid, String name) {
+        BigDecimal cached = BALANCE_CACHE.get(uuid);
+        if (cached != null) {
+            return CompletableFuture.completedFuture(cached);
+        }
+        CompletableFuture<BigDecimal> load = DatabaseManager.submitAsync(() -> loadBalance(uuid))
+                .exceptionally(error -> {
+                    if (error != null) {
+                        LOGGER.warn("Async balance lookup failed for {}", uuid, error);
+                    }
+                    return zeroBalance();
+                });
+        CompletableFuture<BigDecimal> existing = BALANCE_LOADS.putIfAbsent(uuid, load);
+        if (existing != null) {
+            load.cancel(false); // a duplicate cold-cache lookup is harmless; keep the in-flight one
+            return existing;
+        }
+        load.whenComplete((result, error) -> BALANCE_LOADS.remove(uuid, load));
+        return load;
+    }
+
+    /** Cached balance without touching the database (may return null on a cold cache). */
+    public static BigDecimal getCachedBalance(UUID uuid) {
+        return BALANCE_CACHE.get(uuid);
+    }
+
+    /** Drop a cached balance so the next read hits the database (used after a failed transaction). */
+    public static void invalidateCache(UUID uuid) {
+        BALANCE_CACHE.remove(uuid);
+        BALANCE_LOADS.remove(uuid);
+    }
+
+    /** Returns true if the account has at least {@code amount}. */
+    public static boolean has(UUID uuid, BigDecimal amount) {
+        return getBalance(uuid, null).compareTo(MoneyUtil.norm(amount)) >= 0;
+    }
+
+    /** Set the balance directly (admin operation; logs a transaction). */
+    public static boolean set(UUID uuid, String name, BigDecimal balance, String note) {
+        try {
+            return DatabaseManager.call(() -> setInternal(uuid, name, balance, note));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return false;
+        }
+    }
+
+    /** Async variant of {@link #set(UUID, String, BigDecimal, String)}. */
+    public static CompletableFuture<Boolean> setAsync(UUID uuid, String name, BigDecimal balance, String note) {
+        return DatabaseManager.submitAsync(() -> setInternal(uuid, name, balance, note));
+    }
+
+    /** Add money. Returns the new balance, or null on error. */
+    public static BigDecimal add(UUID uuid, String name, BigDecimal amount, String note) {
+        try {
+            return DatabaseManager.call(() -> addInternal(uuid, name, amount, note));
+        } catch (SQLException e) {
+            if (DatabaseManager.isBusyException(e)) {
+                // Adds are payouts/refunds: losing them is worse than applying
+                // them a little late, so re-queue on the worker while the
+                // caller is told the synchronous attempt failed.
+                addAsync(uuid, name, amount, note);
+                return null;
+            }
+            DatabaseManager.log(e);
+            return null;
+        }
+    }
+
+    /** Async variant of {@link #add(UUID, String, BigDecimal, String)}. */
+    public static CompletableFuture<BigDecimal> addAsync(UUID uuid, String name, BigDecimal amount, String note) {
+        return DatabaseManager.submitAsync(() -> addInternal(uuid, name, amount, note));
+    }
+
+    /**
+     * Remove money. Returns the new balance, or null if the account had
+     * insufficient funds (nothing is changed in that case).
+     */
+    public static BigDecimal remove(UUID uuid, String name, BigDecimal amount, String note) {
+        try {
+            return DatabaseManager.call(() -> removeInternal(uuid, name, amount, note));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return null;
+        }
+    }
+
+    /** Async variant of {@link #remove(UUID, String, BigDecimal, String)}. */
+    public static CompletableFuture<BigDecimal> removeAsync(UUID uuid, String name, BigDecimal amount, String note) {
+        return DatabaseManager.submitAsync(() -> removeInternal(uuid, name, amount, note));
+    }
+
+    /**
+     * Transfer money between two accounts, optionally charging the sender a
+     * fee percentage that is credited to the server "bank" account.
+     * Returns true on success.
+     */
+    public static boolean transfer(UUID from, String fromName,
+                                   UUID to, String toName,
+                                   BigDecimal amount, BigDecimal feePercent) {
+        try {
+            return DatabaseManager.call(() -> transferInternal(from, fromName, to, toName, amount, feePercent));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return false;
+        }
+    }
+
+    /** Recent transactions for a player, as {@code {type, amount, note}} rows. */
+    public static List<String[]> getLog(UUID uuid, int limit) {
+        try {
+            return DatabaseManager.call(() -> getLogInternal(uuid, limit));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return List.of();
+        }
+    }
+
+    /** Top balances (name, balance string) for the leaderboard (server bank excluded). */
+    public static List<String[]> topBalances(int limit) {
+        try {
+            return DatabaseManager.call(() -> topBalancesInternal(limit));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return List.of();
+        }
+    }
+
+    /** Resolve an account's UUID by its stored display name, or {@code null}. */
+    public static UUID uuidByName(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+        try {
+            return DatabaseManager.call(() -> uuidByNameInternal(name));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return null;
+        }
+    }
+
+    /** Distinct display names of all accounts (for offline-capable command suggestions). */
+    public static List<String> accountNames() {
+        long now = System.currentTimeMillis();
+        if (nameCache != null && now - nameCacheAt < NAME_CACHE_TTL_MS) {
+            return nameCache;
+        }
+        try {
+            return DatabaseManager.call(EconomyService::loadAccountNames);
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return nameCache == null ? List.of() : nameCache;
+        }
+    }
+
+    /**
+     * Delete transaction rows older than {@code retentionDays}. Returns the number of rows
+     * removed, or -1 if retention is disabled.
+     */
+    public static int purgeOldTransactions(int retentionDays) {
+        try {
+            return DatabaseManager.call(() -> purgeInternal(retentionDays));
+        } catch (SQLException e) {
+            DatabaseManager.log(e);
+            return 0;
+        }
+    }
+
+    /** Async variant of {@link #purgeOldTransactions(int)} (used at startup). */
+    public static CompletableFuture<Integer> purgeOldTransactionsAsync(int retentionDays) {
+        return DatabaseManager.submitAsync(() -> purgeInternal(retentionDays));
+    }
+
+    private static boolean isUuidString(String s) {
+        try {
+            UUID.fromString(s);
+            return true;
+        } catch (IllegalArgumentException e) {
+            return false;
+        }
+    }
+
+    /** A reserved UUID used to accumulate server fees / recycling budgets. */
+    public static final UUID BANK_UUID = UUID.fromString("00000000-0000-0000-0000-000000000001");
+
+    /* ---------------- worker-internal implementations ---------------- */
+
+    private static BigDecimal zeroBalance() {
+        return BigDecimal.ZERO.setScale(MoneyUtil.SCALE, MoneyUtil.ROUNDING);
+    }
+
+    private static BigDecimal loadBalance(UUID uuid) {
         try (Connection c = DatabaseManager.open()) {
             BigDecimal balance = queryBalance(c, uuid);
             BALANCE_CACHE.put(uuid, balance);
             return balance;
         } catch (SQLException e) {
             DatabaseManager.log(e);
+            return zeroBalance();
         }
-        return BigDecimal.ZERO.setScale(MoneyUtil.SCALE, MoneyUtil.ROUNDING);
     }
 
-    /** Drop a cached balance so the next read hits the database (used after a failed transaction). */
-    public static void invalidateCache(UUID uuid) {
-        BALANCE_CACHE.remove(uuid);
-    }
-
-    /** Returns true if the account has at least {@code amount}. */
-    public static synchronized boolean has(UUID uuid, BigDecimal amount) {
-        return getBalance(uuid, null).compareTo(MoneyUtil.norm(amount)) >= 0;
-    }
-
-    /** Set the balance directly (admin operation; logs a transaction). */
-    public static synchronized boolean set(UUID uuid, String name, BigDecimal balance, String note) {
+    private static boolean setInternal(UUID uuid, String name, BigDecimal balance, String note) {
         try (Connection c = DatabaseManager.open()) {
             ensureRowInternal(c, uuid, name);
             BigDecimal normalized = MoneyUtil.norm(balance);
@@ -114,8 +317,7 @@ public final class EconomyService {
         }
     }
 
-    /** Add money. Returns the new balance, or null on error. */
-    public static synchronized BigDecimal add(UUID uuid, String name, BigDecimal amount, String note) {
+    private static BigDecimal addInternal(UUID uuid, String name, BigDecimal amount, String note) {
         BigDecimal add = MoneyUtil.norm(amount);
         if (add.compareTo(BigDecimal.ZERO) < 0) {
             return null;
@@ -141,11 +343,7 @@ public final class EconomyService {
         }
     }
 
-    /**
-     * Remove money. Returns the new balance, or null if the account had
-     * insufficient funds (nothing is changed in that case).
-     */
-    public static synchronized BigDecimal remove(UUID uuid, String name, BigDecimal amount, String note) {
+    private static BigDecimal removeInternal(UUID uuid, String name, BigDecimal amount, String note) {
         BigDecimal remove = MoneyUtil.norm(amount);
         if (remove.compareTo(BigDecimal.ZERO) < 0) {
             return null;
@@ -175,14 +373,9 @@ public final class EconomyService {
         }
     }
 
-    /**
-     * Transfer money between two accounts, optionally charging the sender a
-     * fee percentage that is credited to the server "bank" account.
-     * Returns true on success.
-     */
-    public static synchronized boolean transfer(UUID from, String fromName,
-                                                UUID to, String toName,
-                                                BigDecimal amount, BigDecimal feePercent) {
+    private static boolean transferInternal(UUID from, String fromName,
+                                            UUID to, String toName,
+                                            BigDecimal amount, BigDecimal feePercent) {
         BigDecimal amt = MoneyUtil.norm(amount);
         if (amt.compareTo(BigDecimal.ZERO) <= 0) {
             return false;
@@ -221,26 +414,25 @@ public final class EconomyService {
                 notifyBalanceChanged(from, fromNew);
                 notifyBalanceChanged(to, toNew);
                 return true;
-            } catch (Exception e) {
+            } catch (SQLException | RuntimeException e) {
                 try {
                     c.rollback();
                 } catch (SQLException ignored) {
                 }
-                if (e instanceof SQLException se) {
-                    throw se;
-                }
-                throw (RuntimeException) e;
+                throw e;
             } finally {
                 c.setAutoCommit(true);
             }
         } catch (SQLException e) {
             DatabaseManager.log(e);
             return false;
+        } catch (RuntimeException e) {
+            LOGGER.warn("Unexpected error during transfer", e);
+            return false;
         }
     }
 
-    /** Recent transactions for a player, as {@code {type, amount, note}} rows. */
-    public static synchronized List<String[]> getLog(UUID uuid, int limit) {
+    private static List<String[]> getLogInternal(UUID uuid, int limit) {
         List<String[]> out = new ArrayList<>();
         try (Connection c = DatabaseManager.open();
              PreparedStatement ps = c.prepareStatement(
@@ -260,8 +452,7 @@ public final class EconomyService {
         return out;
     }
 
-    /** Top balances (name, balance string) for the leaderboard (server bank excluded). */
-    public static synchronized List<String[]> topBalances(int limit) {
+    private static List<String[]> topBalancesInternal(int limit) {
         List<String[]> out = new ArrayList<>();
         try (Connection c = DatabaseManager.open();
              PreparedStatement ps = c.prepareStatement(
@@ -280,11 +471,7 @@ public final class EconomyService {
         return out;
     }
 
-    /** Resolve an account's UUID by its stored display name, or {@code null}. */
-    public static synchronized UUID uuidByName(String name) {
-        if (name == null || name.isEmpty()) {
-            return null;
-        }
+    private static UUID uuidByNameInternal(String name) {
         try (Connection c = DatabaseManager.open();
              PreparedStatement ps = c.prepareStatement("SELECT uuid FROM balances WHERE name = ?")) {
             ps.setString(1, name);
@@ -303,12 +490,8 @@ public final class EconomyService {
         return null;
     }
 
-    /** Distinct display names of all accounts (for offline-capable command suggestions). */
-    public static synchronized List<String> accountNames() {
+    private static List<String> loadAccountNames() {
         long now = System.currentTimeMillis();
-        if (nameCache != null && now - nameCacheAt < NAME_CACHE_TTL_MS) {
-            return nameCache;
-        }
         List<String> out = new ArrayList<>();
         try (Connection c = DatabaseManager.open();
              PreparedStatement ps = c.prepareStatement("SELECT DISTINCT name FROM balances")) {
@@ -323,16 +506,12 @@ public final class EconomyService {
         } catch (SQLException e) {
             DatabaseManager.log(e);
         }
-        nameCache = out;
+        nameCache = List.copyOf(out);
         nameCacheAt = now;
-        return out;
+        return nameCache;
     }
 
-    /**
-     * Delete transaction rows older than {@code retentionDays}. Returns the number of rows
-     * removed, or -1 if retention is disabled.
-     */
-    public static synchronized int purgeOldTransactions(int retentionDays) {
+    private static int purgeInternal(int retentionDays) {
         if (retentionDays <= 0) {
             return -1;
         }
@@ -348,19 +527,7 @@ public final class EconomyService {
         }
     }
 
-    private static boolean isUuidString(String s) {
-        try {
-            UUID.fromString(s);
-            return true;
-        } catch (IllegalArgumentException e) {
-            return false;
-        }
-    }
-
-    /** A reserved UUID used to accumulate server fees / recycling budgets. */
-    public static final UUID BANK_UUID = UUID.fromString("00000000-0000-0000-0000-000000000001");
-
-    /* ---------------- internal helpers ---------------- */
+    /* ---------------- SQL helpers (always run on the database worker) ---------------- */
 
     private static void ensureRowInternal(Connection c, UUID uuid, String name) throws SQLException {
         String sql = DatabaseManager.isMySQL()
@@ -395,7 +562,7 @@ public final class EconomyService {
                 }
             }
         }
-        return BigDecimal.ZERO.setScale(MoneyUtil.SCALE, MoneyUtil.ROUNDING);
+        return zeroBalance();
     }
 
     private static void updateBalanceDelta(Connection c, UUID uuid, BigDecimal delta) throws SQLException {

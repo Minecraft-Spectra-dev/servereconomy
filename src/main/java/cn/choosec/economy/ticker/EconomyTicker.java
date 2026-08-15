@@ -1,5 +1,6 @@
 package cn.choosec.economy.ticker;
 
+import cn.choosec.economy.ServerEconomy;
 import cn.choosec.economy.config.ConfigManager;
 import cn.choosec.economy.economy.EconomyService;
 import cn.choosec.economy.economy.MoneyUtil;
@@ -54,6 +55,9 @@ public final class EconomyTicker {
         checkFakePlayerPrompt(server);
         checkReachTasks(server);
         checkDailyRollover(server);
+        // Daily progress is accumulated in memory by gameplay events and applied
+        // in batches on the database worker; nudge a flush here as a safety net.
+        cn.choosec.economy.service.DailyTaskService.flushProgressAsync();
         // Refresh per-player daily-task scoreboards and the tab list every second.
         // Both read from in-memory caches (balance + daily tasks), so this no longer
         // touches the database and is cheap enough to run every tick-second.
@@ -88,7 +92,9 @@ public final class EconomyTicker {
      * Real-time flight billing at the configured per-second rate.
      * Costs are accumulated in memory and flushed to the database in a single
      * transaction-log write every {@link #FLIGHT_BILL_FLUSH_SECONDS} seconds,
-     * cutting per-flying-player write amplification ~5x.
+     * cutting per-flying-player write amplification ~5x. Balance checks and the
+     * periodic flush are asynchronous, so a stalled MySQL server cannot block
+     * this tick handler.
      */
     private static void billFlightPerSecond(MinecraftServer server) {
         BigDecimal perSecond = ConfigManager.get().rates.flightPerSecond;
@@ -100,40 +106,66 @@ public final class EconomyTicker {
                 continue;
             }
             UUID uuid = p.getUUID();
+            String name = p.getName().getString();
             BigDecimal accrued = pendingFlight.merge(uuid, perSecond, BigDecimal::add);
-            pendingFlightName.put(uuid, p.getName().getString());
+            pendingFlightName.put(uuid, name);
             // Cut flight off the moment the accrued cost reaches the balance,
             // rather than waiting up to FLIGHT_BILL_FLUSH_SECONDS for the flush.
-            BigDecimal balance = EconomyService.getBalance(uuid, p.getName().getString());
-            if (accrued.compareTo(balance) >= 0) {
-                p.sendSystemMessage(MessageUtil.parse("&c余额不足，已禁用飞行"));
-                disableFlight(p);
+            BigDecimal balance = EconomyService.getCachedBalance(uuid);
+            if (balance != null) {
+                if (accrued.compareTo(balance) >= 0) {
+                    p.sendSystemMessage(MessageUtil.parse("&c余额不足，已禁用飞行"));
+                    disableFlight(p);
+                }
+                continue;
             }
+            EconomyService.getBalanceAsync(uuid, name).whenComplete((loaded, error) -> {
+                if (error != null || loaded == null) {
+                    return;
+                }
+                BigDecimal stillPending = pendingFlight.getOrDefault(uuid, BigDecimal.ZERO);
+                if (stillPending.compareTo(loaded) >= 0) {
+                    ServerEconomy.runOnServer(() -> {
+                        ServerPlayer flying = server.getPlayerList().getPlayer(uuid);
+                        if (flying != null && isFlying(flying) && !flying.isSpectator()
+                                && !flying.getAbilities().instabuild) {
+                            flying.sendSystemMessage(MessageUtil.parse("&c余额不足，已禁用飞行"));
+                            disableFlight(flying);
+                        }
+                    });
+                }
+            });
         }
         if (tickCount % (FLIGHT_BILL_FLUSH_SECONDS * 20L) == 0) {
             flushFlight(server);
         }
     }
 
-    /** Write accumulated flight costs for all pending players to the database. */
+    /** Write accumulated flight costs for all pending players to the database asynchronously. */
     private static void flushFlight(MinecraftServer server) {
         if (pendingFlight.isEmpty()) {
             return;
         }
-        for (Map.Entry<UUID, BigDecimal> e : pendingFlight.entrySet()) {
-            UUID uuid = e.getKey();
-            BigDecimal total = e.getValue();
-            String name = pendingFlightName.get(uuid);
-            ServerPlayer p = server.getPlayerList().getPlayer(uuid);
-            if (EconomyService.remove(uuid, name, total, "flight") == null) {
-                if (p != null && (p.getAbilities().mayfly || p.getAbilities().flying)) {
-                    p.sendSystemMessage(MessageUtil.parse("&c余额不足，已禁用飞行"));
-                    disableFlight(p);
-                }
-            }
-        }
+        Map<UUID, BigDecimal> batch = new HashMap<>(pendingFlight);
+        Map<UUID, String> names = new HashMap<>(pendingFlightName);
         pendingFlight.clear();
         pendingFlightName.clear();
+        for (Map.Entry<UUID, BigDecimal> e : batch.entrySet()) {
+            UUID uuid = e.getKey();
+            BigDecimal total = e.getValue();
+            String name = names.get(uuid);
+            EconomyService.removeAsync(uuid, name, total, "flight").whenComplete((newBalance, error) -> {
+                if (error != null || newBalance == null) {
+                    ServerEconomy.runOnServer(() -> {
+                        ServerPlayer p = server.getPlayerList().getPlayer(uuid);
+                        if (p != null && (p.getAbilities().mayfly || p.getAbilities().flying)) {
+                            p.sendSystemMessage(MessageUtil.parse("&c余额不足，已禁用飞行"));
+                            disableFlight(p);
+                        }
+                    });
+                }
+            });
+        }
     }
 
     /** Flush a single player's accrued flight cost (e.g. on disconnect). */
@@ -141,13 +173,31 @@ public final class EconomyTicker {
         BigDecimal total = pendingFlight.remove(uuid);
         if (total != null) {
             String name = pendingFlightName.remove(uuid);
-            EconomyService.remove(uuid, name, total, "flight");
+            EconomyService.removeAsync(uuid, name, total, "flight");
         }
     }
 
-    /** Flush all accrued flight costs (e.g. at server stop). */
+    /**
+     * Flush all accrued flight costs synchronously (e.g. at server stop), when
+     * the tick watchdog is no longer running and we must not lose pending charges.
+     */
     public static void flushAllFlight(MinecraftServer server) {
-        flushFlight(server);
+        if (pendingFlight.isEmpty()) {
+            return;
+        }
+        Map<UUID, BigDecimal> batch = new HashMap<>(pendingFlight);
+        Map<UUID, String> names = new HashMap<>(pendingFlightName);
+        pendingFlight.clear();
+        pendingFlightName.clear();
+        for (Map.Entry<UUID, BigDecimal> e : batch.entrySet()) {
+            try {
+                EconomyService.removeAsync(e.getKey(), names.get(e.getKey()), e.getValue(), "flight").join();
+            } catch (RuntimeException ex) {
+                // Server is stopping; log and continue so other pending charges still flush.
+                cn.choosec.economy.database.DatabaseManager.log(
+                        new java.sql.SQLException("Failed to flush flight charge for " + e.getKey(), ex));
+            }
+        }
     }
 
     /** Prompt players who exceed the free fake-player allowance (e.g. when summoning the 2nd+). */
@@ -175,7 +225,7 @@ public final class EconomyTicker {
         }
     }
 
-    /** Hourly billing for the excess fake players (from Carpet detection). */
+    /** Hourly billing for the excess fake players (from Carpet detection), applied asynchronously. */
     private static void billFakePlayers(MinecraftServer server) {
         int free = Math.max(0, ConfigManager.get().fakePlayers.freePerPlayer);
         BigDecimal hourly = ConfigManager.get().rates.fakePlayerHourly;
@@ -186,13 +236,17 @@ public final class EconomyTicker {
                 continue;
             }
             BigDecimal cost = hourly.multiply(BigDecimal.valueOf(extra)).setScale(MoneyUtil.SCALE, RoundingMode.HALF_UP);
-            boolean success = EconomyService.remove(owner, null, cost, "fake-player billing") != null;
-            ServerPlayer p = server.getPlayerList().getPlayer(owner);
-            if (p != null) {
-                p.sendSystemMessage(MessageUtil.parse(
-                        success ? "&c假人扣费 &e" + MoneyUtil.format(cost)
-                                : "&c余额不足，假人费用 &e" + MoneyUtil.format(cost) + " &c未支付"));
-            }
+            EconomyService.removeAsync(owner, null, cost, "fake-player billing").whenComplete((newBalance, error) -> {
+                boolean success = error == null && newBalance != null;
+                ServerEconomy.runOnServer(() -> {
+                    ServerPlayer p = server.getPlayerList().getPlayer(owner);
+                    if (p != null) {
+                        p.sendSystemMessage(MessageUtil.parse(
+                                success ? "&c假人扣费 &e" + MoneyUtil.format(cost)
+                                        : "&c余额不足，假人费用 &e" + MoneyUtil.format(cost) + " &c未支付"));
+                    }
+                });
+            });
         }
     }
 
