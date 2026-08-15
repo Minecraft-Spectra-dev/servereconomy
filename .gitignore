@@ -48,3 +48,6 @@ replay_*.log
 
 .tmp_*/
 .tmp_list.txt
+
+# dsh local notes (never commit)
+/AGENTS.md
