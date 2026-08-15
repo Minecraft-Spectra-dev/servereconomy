@@ -4,6 +4,7 @@ import cn.choosec.economy.model.HomeLocation;
 import cn.choosec.economy.service.LandmarkService;
 import cn.choosec.economy.util.MessageUtil;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.exceptions.CommandSyntaxException;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
@@ -61,21 +62,23 @@ public final class LegacyCommands {
         d.register(Commands.literal("tpacancel").executes(ctx -> executeTpaCancel(ctx)));
 
         // /home, /sethome, /delhome, /homes, /renamehome
+        // 末尾参数用 greedyString（无引号中文/空格均可用，引号由 CommandUtil.unquoteGreedy 处理）；
+        // 中间参数用 string()（后面还有参数，含中文或空格时需加引号）。
         d.register(Commands.literal("home")
                 .executes(ctx -> executeHomeTp(ctx))
-                .then(Commands.argument("name", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
+                .then(Commands.argument("name", StringArgumentType.greedyString()).suggests(homeSuggestions())
                         .executes(ctx -> executeHomeTp(ctx))));
         d.register(Commands.literal("sethome")
                 .executes(ctx -> executeHomeAdd(ctx))
-                .then(Commands.argument("name", LandmarkNameArgumentType.name()).executes(ctx -> executeHomeAdd(ctx))));
+                .then(Commands.argument("name", StringArgumentType.greedyString()).executes(ctx -> executeHomeAdd(ctx))));
         d.register(Commands.literal("delhome")
                 .executes(ctx -> executeHomeDel(ctx))
-                .then(Commands.argument("name", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
+                .then(Commands.argument("name", StringArgumentType.greedyString()).suggests(homeSuggestions())
                         .executes(ctx -> executeHomeDel(ctx))));
         d.register(Commands.literal("homes").executes(ctx -> executeHomeList(ctx)));
         d.register(Commands.literal("renamehome")
-                .then(Commands.argument("old", LandmarkNameArgumentType.name()).suggests(homeSuggestions())
-                        .then(Commands.argument("new", LandmarkNameArgumentType.name())
+                .then(Commands.argument("old", StringArgumentType.string()).suggests(homeSuggestions())
+                        .then(Commands.argument("new", StringArgumentType.greedyString())
                                 .executes(ctx -> executeHomeRename(ctx)))));
 
         // /back, /hat
@@ -238,7 +241,9 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx))
+                ? CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "name"))
+                : "home";
         if (name.isEmpty()) {
             CommandUtil.failure(src, "&c名称不能为空！");
             return 0;
@@ -264,7 +269,9 @@ public final class LegacyCommands {
 
         ServerPlayer player = src.getPlayerOrException();
         MinecraftServer server = src.getServer();
-        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx))
+                ? CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "name"))
+                : "home";
         HomeLocation loc = LandmarkService.getHome(player.getUUID(), name);
         if (loc == null) {
             CommandUtil.failure(src, "&c传送点 &e" + name + " &c不存在！用 /homes 查看所有传送点。");
@@ -308,7 +315,9 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String name = "name".equals(lastNode(ctx)) ? LandmarkNameArgumentType.getName(ctx, "name") : "home";
+        String name = "name".equals(lastNode(ctx))
+                ? CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "name"))
+                : "home";
         if (!LandmarkService.removeHome(player.getUUID(), name)) {
             CommandUtil.failure(src, "&c传送点 &e" + name + " &c不存在！");
             return 0;
@@ -321,8 +330,8 @@ public final class LegacyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer player = src.getPlayerOrException();
-        String oldName = LandmarkNameArgumentType.getName(ctx, "old");
-        String newName = LandmarkNameArgumentType.getName(ctx, "new");
+        String oldName = StringArgumentType.getString(ctx, "old");
+        String newName = CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "new"));
         if (oldName.isEmpty() || newName.isEmpty()) {
             CommandUtil.failure(src, "&c名称不能为空！");
             return 0;

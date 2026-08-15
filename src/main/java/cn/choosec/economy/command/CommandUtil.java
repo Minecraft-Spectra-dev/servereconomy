@@ -24,6 +24,20 @@ public final class CommandUtil {
         src.sendFailure(MessageUtil.parse(text));
     }
 
+    /**
+     * {@code StringArgumentType.greedyString()} keeps surrounding quotes in the
+     * value (unlike the quoted string parser). Strip one matching pair of
+     * double quotes so trailing landmark/home names such as {@code "my home"}
+     * keep working alongside unquoted CJK names.
+     */
+    public static String unquoteGreedy(String value) {
+        if (value != null && value.length() >= 2
+                && value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"') {
+            return value.substring(1, value.length() - 1);
+        }
+        return value;
+    }
+
     public static boolean requirePlayer(CommandSourceStack src) {
         return src.getPlayer() != null;
     }

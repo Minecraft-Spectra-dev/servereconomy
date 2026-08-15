@@ -164,22 +164,24 @@ public final class EconomyCommands {
                         .executes(ctx -> marketCancel(ctx)))));
 
         // public landmarks (warp)
+        // 末尾参数用 greedyString（无引号中文/空格均可用，引号由 CommandUtil.unquoteGreedy 处理）；
+        // 中间参数用 string()（后面还有参数，含中文或空格时需加引号）。
         d.register(Commands.literal("warp")
                 .executes(ctx -> warpHelp(ctx))
-                .then(Commands.literal("tp").then(Commands.argument("name", LandmarkNameArgumentType.name())
+                .then(Commands.literal("tp").then(Commands.argument("name", StringArgumentType.greedyString())
                         .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
                         .executes(ctx -> landmarkTp(ctx))))
-                .then(Commands.literal("add").then(Commands.argument("name", LandmarkNameArgumentType.name())
+                .then(Commands.literal("add").then(Commands.argument("name", StringArgumentType.string())
                         .executes(ctx -> landmarkAdd(ctx))
                         .then(Commands.argument("cost", DoubleArgumentType.doubleArg(0.0))
                                 .executes(ctx -> landmarkAdd(ctx)))))
                 .then(Commands.literal("rename")
-                        .then(Commands.argument("name", LandmarkNameArgumentType.name())
+                        .then(Commands.argument("name", StringArgumentType.string())
                                 .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
-                                .then(Commands.argument("newname", LandmarkNameArgumentType.name())
+                                .then(Commands.argument("newname", StringArgumentType.greedyString())
                                         .executes(ctx -> landmarkRename(ctx)))))
                 .then(Commands.literal("list").executes(ctx -> landmarkList(ctx)))
-                .then(Commands.literal("del").then(Commands.argument("name", LandmarkNameArgumentType.name())
+                .then(Commands.literal("del").then(Commands.argument("name", StringArgumentType.greedyString())
                         .suggests((ctx, b) -> EcoSuggestions.publicLandmarks(b))
                         .executes(ctx -> landmarkDel(ctx)))));
 
@@ -854,7 +856,7 @@ public final class EconomyCommands {
         CommandSourceStack src = ctx.getSource();
 
         ServerPlayer p = src.getPlayerOrException();
-        String name = LandmarkNameArgumentType.getName(ctx, "name");
+        String name = CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "name"));
         LandmarkService.Landmark lm = LandmarkService.getPublic(name);
         if (lm == null) {
             CommandUtil.failure(src, "&c公共地标 &e" + name + " &c不存在！");
@@ -887,7 +889,7 @@ public final class EconomyCommands {
             return 0;
         }
         ServerPlayer p = src.getPlayerOrException();
-        String name = LandmarkNameArgumentType.getName(ctx, "name");
+        String name = StringArgumentType.getString(ctx, "name");
         if (name.isEmpty()) {
             CommandUtil.failure(src, "&c名称不能为空！");
             return 0;
@@ -911,7 +913,7 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c需要管理员权限！");
             return 0;
         }
-        String name = LandmarkNameArgumentType.getName(ctx, "name");
+        String name = CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "name"));
         if (LandmarkService.removePublic(name)) {
             CommandUtil.success(src, "&a已删除公共地标 &e" + name);
         } else {
@@ -927,8 +929,8 @@ public final class EconomyCommands {
             CommandUtil.failure(src, "&c需要管理员权限！");
             return 0;
         }
-        String oldName = LandmarkNameArgumentType.getName(ctx, "name");
-        String newName = LandmarkNameArgumentType.getName(ctx, "newname");
+        String oldName = StringArgumentType.getString(ctx, "name");
+        String newName = CommandUtil.unquoteGreedy(StringArgumentType.getString(ctx, "newname"));
         if (oldName.isEmpty() || newName.isEmpty()) {
             CommandUtil.failure(src, "&c名称不能为空！");
             return 0;
@@ -954,7 +956,8 @@ public final class EconomyCommands {
         src.sendSystemMessage(MessageUtil.parse("&e/warp add <名称> [费用] &7添加公共地标（管理员）"));
         src.sendSystemMessage(MessageUtil.parse("&e/warp rename <旧名称> <新名称> &7重命名公共地标（管理员）"));
         src.sendSystemMessage(MessageUtil.parse("&e/warp del <名称> &7删除公共地标（管理员）"));
-        src.sendSystemMessage(MessageUtil.parse("&7名称支持中文（名称含空格时请加引号）"));
+        src.sendSystemMessage(MessageUtil.parse("&7名称支持中文；末尾参数可直接输入（如 &f/warp tp 主城&7），"
+                + "位于命令中间且含中文或空格时请用引号（如 &f/warp rename \"主城\" \"新主城\"&7）"));
         src.sendSystemMessage(MessageUtil.parse("&6=================================="));
         return 1;
     }
